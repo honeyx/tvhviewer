@@ -1,12 +1,12 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="tvhplayer",
-    version="3.4",
-    description="Desktop client for TVHeadend",
-    author="mFat",
-    author_email="mah.fat@gmail.com",
-    url="https://github.com/mfat/tvhplayer",
+    name="tvhviewer",
+    version="1.0.0",
+    description="More modern desktop client for Tvheadend. Watch and record live TV (fork of TVHplayer by mFat)",
+    author="mFat (original), fork maintained by honeyx",
+    author_email="",
+    url="https://github.com/honeyx/tvhviewer",
     install_requires=[
         'PyQt5>=5.15.0',
         'python-vlc>=3.0.12122',
