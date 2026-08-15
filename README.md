@@ -5,7 +5,7 @@ More modern desktop client for [TVHeadend](https://tvheadend.org/). Watch and re
 **TVHviewer is a fork of [TVHplayer](https://github.com/mfat/tvhplayer) by mFat.**
 See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in this fork.
 
-![Screenshot](Screenshots/Screenshot_6.png)
+![Screenshot](Screenshots/Screenshot_7.png)
 
 ## Features
 
@@ -17,7 +17,7 @@ See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in thi
 - Local recording (saves to disk via VLC/ffmpeg) with remembered save location
 - Server status, tuner signal strength, and video/audio format shown
   in the status bar
-- Cross-platform (Linux, macOS, Windows) — this fork has mainly been
+- Cross-platform (Linux, Windows) — this fork has mainly been
   tested on Linux (Zorin OS / Ubuntu)
 
 ## Install
