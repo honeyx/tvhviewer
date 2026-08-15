@@ -28,6 +28,13 @@ Download the latest `.deb` from [Releases](../../releases) and install:
 sudo apt install ./tvhviewer_*.deb
 ```
 
+### Windows (built executable)
+Download the latest `tvhviewer-windows.exe` from
+[Releases](../../releases).
+**You still need [VLC](https://www.videolan.org/vlc/) installed separately** —
+the executable bundles the Python/Qt app but not the VLC engine itself
+(python-vlc only provides bindings to your system's VLC installation).
+
 ### From source
 ```bash
 git clone https://github.com/honeyx/tvhviewer.git
