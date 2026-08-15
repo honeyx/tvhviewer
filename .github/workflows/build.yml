@@ -8,9 +8,13 @@ on:
 env:
   PYTHON_VERSION: "3.11"
 
+permissions:
+  contents: write  # needed so the workflow can attach build artifacts to the release
+
 jobs:
   build:
     strategy:
+      fail-fast: false  # one platform failing shouldn't cancel the others
       matrix:
         os: [macos-13, macos-14, windows-latest, ubuntu-latest]
         include:
