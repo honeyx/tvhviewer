@@ -53,6 +53,7 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} `
             --add-data "icons;icons" `
+            --collect-all PyQt5 `
             tvhplayer/tvhplayer.py
         shell: pwsh
 
@@ -61,6 +62,7 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} \
             --add-data "icons:icons" \
+            --collect-all PyQt5 \
             tvhplayer/tvhplayer.py
         shell: bash
 
