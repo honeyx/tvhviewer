@@ -4,10 +4,10 @@ on:
   push:
     tags:
       - '*'  # Trigger on tag pushes, for versioning
+
 env:
-  PYTHON_VERSION: "3.13"  # Python version
-  VERSION: ${{ github.ref_name }}  # GitHub reference name (e.g., tag)
-  
+  PYTHON_VERSION: "3.11"
+
 jobs:
   build:
     strategy:
@@ -16,16 +16,16 @@ jobs:
         include:
           - os: macos-13
             arch: x86_64  # macOS Intel
-            artifact_name: tvhplayer-${{ env.VERSION }}-macos-intel-x86
+            artifact_name: tvhviewer-macos-intel-x86
           - os: macos-14
             arch: arm64  # macOS ARM64 (M1/M2)
-            artifact_name: tvhplayer-${{ env.VERSION }}-macos-arm64
+            artifact_name: tvhviewer-macos-arm64
           - os: windows-latest
             arch: amd64
-            artifact_name: tvhplayer-${{ env.VERSION }}-windows.exe
+            artifact_name: tvhviewer-windows
           - os: ubuntu-latest
             arch: amd64
-            artifact_name: tvhplayer-${{ env.VERSION }}-linux
+            artifact_name: tvhviewer-linux
 
     runs-on: ${{ matrix.os }}
 
@@ -38,37 +38,44 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Get the version from the latest tag
-        id: version
-        run: echo "VERSION=$(git describe --tags --abbrev=0)" >> $GITHUB_ENV
-
-      - name: Build executable
+      - name: Install build dependencies
         run: |
-          ARTIFACT_NAME="${{ matrix.artifact_name }}-${VERSION}"
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            pyinstaller --onefile setup.py --name=${ARTIFACT_NAME}
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            pyinstaller --onefile setup.py --name=${ARTIFACT_NAME}
-          else
-            pyinstaller --onefile setup.py --name=${ARTIFACT_NAME}.exe
-          fi
+          python -m pip install --upgrade pip
+          pip install pyqt5 python-vlc requests urllib3 pillow pyinstaller
         shell: bash
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
+      - name: Build executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} `
+            --add-data "icons;icons" `
+            tvhplayer/tvhplayer.py
+        shell: pwsh
+
+      - name: Build executable (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} \
+            --add-data "icons:icons" \
+            tvhplayer/tvhplayer.py
+        shell: bash
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}-${{ github.ref_name }}
-          path: dist/${{ matrix.artifact_name }}-${VERSION}*
+          path: |
+            dist/${{ matrix.artifact_name }}
+            dist/${{ matrix.artifact_name }}.exe
+          if-no-files-found: ignore
 
-      - name: Upload to GitHub Releases
+      - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "Release ${{ github.ref_name }} (${VERSION})"
-          body: "Auto-generated release for version ${{ github.ref_name }} (${VERSION})"
-          files: dist/${{ matrix.artifact_name }}-${VERSION}*
+          name: "TVHviewer ${{ github.ref_name }}"
+          files: |
+            dist/${{ matrix.artifact_name }}
+            dist/${{ matrix.artifact_name }}.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
