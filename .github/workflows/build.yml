@@ -48,12 +48,21 @@ jobs:
           pip install pyqt5 python-vlc requests urllib3 pillow pyinstaller
         shell: bash
 
+      - name: Locate PyQt5 platform plugin (Windows)
+        if: runner.os == 'Windows'
+        id: pyqt5_plugins
+        run: |
+          $path = python -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'plugins', 'platforms'))"
+          echo "path=$path" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
       - name: Build executable (Windows)
         if: runner.os == 'Windows'
         run: |
           pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} `
             --add-data "icons;icons" `
             --collect-all PyQt5 `
+            --add-binary "${{ steps.pyqt5_plugins.outputs.path }}\qwindows.dll;platforms" `
             tvhplayer/tvhplayer.py
         shell: pwsh
 
