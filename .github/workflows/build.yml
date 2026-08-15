@@ -48,22 +48,25 @@ jobs:
           pip install pyqt5 python-vlc requests urllib3 pillow pyinstaller
         shell: bash
 
-      - name: Locate PyQt5 platform plugin (Windows)
-        if: runner.os == 'Windows'
-        id: pyqt5_plugins
-        run: |
-          $path = python -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'plugins', 'platforms'))"
-          echo "path=$path" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
+      # --- Windows: build as a folder (--onedir), not a single --onefile
+      # exe. --onefile extracts everything to a temp folder at every
+      # startup, which repeatedly broke Qt's platform-plugin loading.
+      # --onedir keeps the exe and all DLLs sitting right next to each
+      # other on disk - the setup PyInstaller itself recommends for Qt
+      # apps - and sidesteps that whole class of problem.
       - name: Build executable (Windows)
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} `
+          pyinstaller --onedir --windowed --name=${{ matrix.artifact_name }} `
             --add-data "icons;icons" `
             --collect-all PyQt5 `
-            --add-binary "${{ steps.pyqt5_plugins.outputs.path }}\qwindows.dll;platforms" `
             tvhplayer/tvhplayer.py
+        shell: pwsh
+
+      - name: Zip Windows build folder
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path "dist/${{ matrix.artifact_name }}/*" -DestinationPath "dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip"
         shell: pwsh
 
       - name: Build executable (macOS/Linux)
@@ -75,13 +78,94 @@ jobs:
             tvhplayer/tvhplayer.py
         shell: bash
 
+      # --- Linux: also build a real installable .deb package (small,
+      # relies on system-installed PyQt5/VLC via apt, instead of bundling
+      # everything like the portable PyInstaller binary above).
+      - name: Build .deb package (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          python3 - << 'PYEOF'
+          import os, stat, re
+
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          root = "pkgroot"
+
+          dirs = [
+              f"{root}/usr/lib/python3/dist-packages/tvhplayer",
+              f"{root}/usr/bin",
+              f"{root}/usr/share/applications",
+              f"{root}/usr/share/icons/hicolor/256x256/apps",
+              f"{root}/usr/share/icons/tvhplayer",
+              f"{root}/DEBIAN",
+          ]
+          for d in dirs:
+              os.makedirs(d, exist_ok=True)
+
+          import shutil
+          shutil.copy("tvhplayer/__init__.py", f"{root}/usr/lib/python3/dist-packages/tvhplayer/")
+          shutil.copy("tvhplayer/tvhplayer.py", f"{root}/usr/lib/python3/dist-packages/tvhplayer/")
+          for fn in os.listdir("icons"):
+              if fn.endswith((".svg", ".png")):
+                  shutil.copy(f"icons/{fn}", f"{root}/usr/share/icons/tvhplayer/{fn}")
+          shutil.copy("tvhplayer.png", f"{root}/usr/share/icons/hicolor/256x256/apps/tvhviewer.png")
+          shutil.copy("tvhplayer.png", f"{root}/usr/share/icons/tvhplayer/tvhviewer.png")
+
+          launcher = f"{root}/usr/bin/tvhviewer"
+          with open(launcher, "w") as f:
+              f.write(
+                  "#!/usr/bin/env python3\n"
+                  "import sys\n"
+                  "sys.path.insert(0, '/usr/lib/python3/dist-packages')\n"
+                  "from tvhplayer.tvhplayer import main\n"
+                  "if __name__ == '__main__':\n"
+                  "    main()\n"
+              )
+          st = os.stat(launcher)
+          os.chmod(launcher, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+          with open(f"{root}/usr/share/applications/tvhviewer.desktop", "w") as f:
+              f.write(
+                  "[Desktop Entry]\n"
+                  "Name=TVHviewer\n"
+                  "Comment=More modern desktop client for Tvheadend. Watch and record live TV\n"
+                  "Exec=/usr/bin/tvhviewer\n"
+                  "Icon=tvhviewer\n"
+                  "Terminal=false\n"
+                  "Type=Application\n"
+                  "Categories=AudioVideo;Player;TV;\n"
+              )
+
+          with open(f"{root}/DEBIAN/control", "w") as f:
+              f.write(
+                  f"Package: tvhviewer\n"
+                  f"Version: {version}\n"
+                  f"Section: video\n"
+                  f"Priority: optional\n"
+                  f"Architecture: all\n"
+                  f"Depends: python3 (>= 3.8), python3-pyqt5, python3-vlc, vlc, python3-requests, python3-urllib3, python3-pil\n"
+                  f"Maintainer: honeyx <noreply@example.com>\n"
+                  f"Description: More modern desktop client for Tvheadend\n"
+                  f" Watch and record live TV. TVHviewer is a fork of TVHplayer,\n"
+                  f" originally created by mFat (https://github.com/mfat/tvhplayer).\n"
+                  f" Features a dark/light theme, a full multi-channel EPG grid with\n"
+                  f" timeline and newspaper views, favorites, and local recording.\n"
+              )
+          PYEOF
+
+          find pkgroot -type d -exec chmod 755 {} \;
+          VERSION="${GITHUB_REF_NAME#v}"
+          dpkg-deb --build --root-owner-group pkgroot "tvhviewer_${VERSION}_all.deb"
+        shell: bash
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}-${{ github.ref_name }}
           path: |
-            dist/${{ matrix.artifact_name }}
             dist/${{ matrix.artifact_name }}.exe
+            dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
+            dist/${{ matrix.artifact_name }}
+            tvhviewer_*_all.deb
           if-no-files-found: ignore
 
       - name: Attach to GitHub Release
@@ -90,7 +174,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "TVHviewer ${{ github.ref_name }}"
           files: |
-            dist/${{ matrix.artifact_name }}
             dist/${{ matrix.artifact_name }}.exe
+            dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
+            dist/${{ matrix.artifact_name }}
+            tvhviewer_*_all.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
