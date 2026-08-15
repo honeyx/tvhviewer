@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 import sys
-from tkinter.filedialog import FileDialog
 import vlc
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -8,22 +7,15 @@ from PyQt5.QtWidgets import (
     QListWidget, QDialog, QFormLayout, QLineEdit,
     QDialogButtonBox, QMessageBox, QApplication,
     QPushButton, QLabel, QSlider, QStatusBar, QGridLayout, QMenuBar, QRadioButton, QSpinBox, QGraphicsOpacityEffect, QFileDialog,
-    QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox  # Added QGroupBox here
+    QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
+    QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QCoreApplication
-from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal
+from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics
 import json
 import requests
-# Replace this line:
-#from . import resources_rc
-
-# With this more flexible import approach:
-try:
-    from . import resources_rc  # Try package import first
-except ImportError:
-    import resources_rc  # Fall back to direct import when running from source
-# or
-#from tvhplayer import resources_rc  # Use absolute import
+# Note: this app loads all icons via filesystem paths (see get_icon()),
+# not Qt's compiled resource system, so no resources_rc import is needed.
 import time
 import subprocess
 import os
@@ -33,6 +25,260 @@ import logging
 import platform
 
 
+# ---------------------------------------------------------------------------
+# Themes (compact panels, blue accent, clear grid lines)
+# ---------------------------------------------------------------------------
+
+DARK_THEME = {
+    'window_bg': '#20242a',
+    'panel_bg': '#262b33',
+    'alt_row': '#2c313a',
+    'border': '#3a4048',
+    'text': '#e0e3e8',
+    'text_dim': '#9aa2ad',
+    'accent': '#3d8ef8',
+    'accent_dark': '#2d6fd0',
+    'header_bg': '#1a1d22',
+    'now_line': '#ff5a5a',
+    'epg_now': '#2d4a6b',
+    'epg_future': '#2c313a',
+    'epg_border': '#3a4048',
+}
+
+LIGHT_THEME = {
+    'window_bg': '#eef1f5',
+    'panel_bg': '#ffffff',
+    'alt_row': '#f3f5f8',
+    'border': '#c7ccd3',
+    'text': '#20242a',
+    'text_dim': '#5b6270',
+    'accent': '#2f7cd6',
+    'accent_dark': '#2266b8',
+    'header_bg': '#dde3ea',
+    'now_line': '#e03030',
+    'epg_now': '#cfe1f7',
+    'epg_future': '#f3f5f8',
+    'epg_border': '#c7ccd3',
+}
+
+
+def build_stylesheet(c):
+    """Build a Qt stylesheet from a color dict."""
+    return f"""
+    QMainWindow, QDialog, QWidget#centralArea {{
+        background-color: {c['window_bg']};
+    }}
+    QWidget {{
+        color: {c['text']};
+        selection-background-color: {c['accent']};
+        selection-color: #ffffff;
+        font-size: 13px;
+    }}
+    QMenuBar {{
+        background-color: {c['header_bg']};
+        color: {c['text']};
+        border-bottom: 1px solid {c['border']};
+        padding: 2px;
+    }}
+    QMenuBar::item {{
+        background: transparent;
+        padding: 4px 10px;
+        border-radius: 4px;
+    }}
+    QMenuBar::item:selected {{
+        background: {c['accent']};
+        color: #ffffff;
+    }}
+    QMenu {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+        border: 1px solid {c['border']};
+    }}
+    QMenu::item {{
+        padding: 5px 22px;
+    }}
+    QMenu::item:selected {{
+        background-color: {c['accent']};
+        color: #ffffff;
+    }}
+    QToolBar {{
+        background-color: {c['header_bg']};
+        border-bottom: 1px solid {c['border']};
+        spacing: 4px;
+        padding: 3px;
+    }}
+    QToolBar::separator {{
+        background-color: {c['border']};
+        width: 1px;
+        margin: 4px 6px;
+    }}
+    QToolButton {{
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        padding: 4px;
+    }}
+    QToolButton:hover {{
+        background-color: {c['alt_row']};
+        border: 1px solid {c['border']};
+    }}
+    QToolButton:pressed, QToolButton:checked {{
+        background-color: {c['accent']};
+    }}
+    QStatusBar {{
+        background-color: {c['header_bg']};
+        color: {c['text_dim']};
+        border-top: 1px solid {c['border']};
+    }}
+    QStatusBar::item {{
+        border: none;
+    }}
+    QFrame {{
+        color: {c['text']};
+    }}
+    QSplitter::handle {{
+        background-color: {c['border']};
+    }}
+    QSplitter::handle:horizontal {{
+        width: 2px;
+    }}
+    QTableWidget, QListWidget, QTreeWidget, QListView, QTreeView, QColumnView {{
+        background-color: {c['panel_bg']};
+        alternate-background-color: {c['alt_row']};
+        gridline-color: {c['border']};
+        border: 1px solid {c['border']};
+        border-radius: 4px;
+        color: {c['text']};
+    }}
+    QTableWidget::item, QListWidget::item, QListView::item, QTreeView::item {{
+        padding: 3px;
+        color: {c['text']};
+    }}
+    QTableWidget::item:selected, QListWidget::item:selected, QListView::item:selected, QTreeView::item:selected {{
+        background-color: {c['accent']};
+        color: #ffffff;
+    }}
+    QFileDialog {{
+        background-color: {c['window_bg']};
+        color: {c['text']};
+    }}
+    QFileDialog QWidget {{
+        color: {c['text']};
+    }}
+    QFileDialog QLineEdit, QFileDialog QComboBox {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+    }}
+    QSidebar, QFileDialog QListView, QFileDialog QTreeView {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+    }}
+    QFileDialog QToolButton, QFileDialog QPushButton {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+        border: 1px solid {c['border']};
+    }}
+    QTabWidget::pane {{
+        border: 1px solid {c['border']};
+        background-color: {c['panel_bg']};
+        top: -1px;
+    }}
+    QTabBar::tab {{
+        background-color: {c['header_bg']};
+        color: {c['text']};
+        padding: 6px 14px;
+        border: 1px solid {c['border']};
+        border-bottom: none;
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+        margin-right: 2px;
+    }}
+    QTabBar::tab:selected {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+    }}
+    QTabBar::tab:!selected {{
+        color: {c['text_dim']};
+    }}
+    QTabBar::tab:hover {{
+        background-color: {c['alt_row']};
+        color: {c['text']};
+    }}
+    QTextEdit, QPlainTextEdit, QTextBrowser {{
+        background-color: {c['panel_bg']};
+        color: {c['text']};
+        border: 1px solid {c['border']};
+        border-radius: 4px;
+        selection-background-color: {c['accent']};
+        selection-color: #ffffff;
+    }}
+    QHeaderView::section {{
+        background-color: {c['header_bg']};
+        color: {c['text_dim']};
+        padding: 5px;
+        border: none;
+        border-bottom: 1px solid {c['border']};
+        border-right: 1px solid {c['border']};
+    }}
+    QComboBox, QLineEdit, QSpinBox {{
+        background-color: {c['panel_bg']};
+        border: 1px solid {c['border']};
+        border-radius: 4px;
+        padding: 3px 5px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {c['panel_bg']};
+        selection-background-color: {c['accent']};
+    }}
+    QPushButton {{
+        background-color: {c['panel_bg']};
+        border: 1px solid {c['border']};
+        border-radius: 5px;
+        padding: 5px 10px;
+    }}
+    QPushButton:hover {{
+        background-color: {c['alt_row']};
+        border-color: {c['accent']};
+    }}
+    QPushButton:pressed {{
+        background-color: {c['accent']};
+        color: #ffffff;
+    }}
+    QScrollBar:vertical {{
+        background: {c['panel_bg']};
+        width: 12px;
+        margin: 0px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {c['border']};
+        min-height: 24px;
+        border-radius: 5px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: {c['accent']};
+    }}
+    QScrollBar:horizontal {{
+        background: {c['panel_bg']};
+        height: 12px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {c['border']};
+        min-width: 24px;
+        border-radius: 5px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background: {c['accent']};
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{
+        height: 0px;
+        width: 0px;
+    }}
+    QLabel#serverLabel {{
+        color: {c['text_dim']};
+    }}
+    """
 
 
 class Logger:
@@ -872,7 +1118,7 @@ class TVHeadendClient(QMainWindow):
 
 
         # Set window title and geometry from config
-        self.setWindowTitle("TVHplayer")
+        self.setWindowTitle("TVHviewer")
         geometry = self.config.get('window_geometry', {'x': 100, 'y': 100, 'width': 1200, 'height': 700})
         self.setGeometry(
             geometry['x'],
@@ -889,7 +1135,15 @@ class TVHeadendClient(QMainWindow):
         self.channels = []
         
         self.is_fullscreen = False
- 
+
+        # Reference to the (single) open all-channel EPG grid dialog, if any
+        self._epg_grid_dialog = None
+
+        # Tracks whichever channel is currently playing (or was last
+        # played), regardless of what's selected in the (now hidden)
+        # channel table - recording buttons fall back to this.
+        self.current_channel_data = None
+
         
         # Add recording indicator variables
         self.recording_indicator_timer = None
@@ -923,6 +1177,13 @@ class TVHeadendClient(QMainWindow):
                 '--network-caching=1000',  # Increase network caching for streaming
                 '--no-video-title-show',  # Don't show the video title
                 '--no-snapshot-preview',  # Don't show snapshot previews
+                # Let Qt handle ALL keyboard/mouse input on the embedded
+                # video surface. Without these, libvlc's own hotkey layer
+                # (which has its own F=fullscreen / double-click=fullscreen
+                # bindings) fires *in addition* to our Qt-level toggle,
+                # which caused fullscreen to get stuck or double-toggle.
+                '--no-keyboard-events',
+                '--no-mouse-events',
             ]
             
             self.instance = vlc.Instance(vlc_args)
@@ -941,6 +1202,9 @@ class TVHeadendClient(QMainWindow):
             print(f"Error initializing VLC: {str(e)}")
             raise RuntimeError(f"Failed to initialize VLC: {str(e)}")
         
+        # Apply color theme (dark/light) before building the UI
+        self.apply_theme(self.config.get('theme', 'dark'), persist=False)
+
         # Then setup UI
         self.setup_ui()
         
@@ -1028,30 +1292,59 @@ class TVHeadendClient(QMainWindow):
         
     def get_icon(self, icon_name):
         """Get icon path and verify it exists"""
-        # Always use app_dir/icons path
-        icon_path = self.app_dir / 'icons' / icon_name
+        # Use the already-resolved icons directory (handles the packaged/
+        # installed-location fallbacks), not just app_dir/icons
+        icon_path = Path(self.icons_dir) / icon_name
         if not icon_path.exists():
             print(f"Warning: Icon not found: {icon_path}")
             return None
         return str(icon_path)
     
+    def apply_theme(self, theme_name, persist=True):
+        """Apply the Dark or Light theme app-wide"""
+        theme_name = theme_name if theme_name in ('dark', 'light') else 'dark'
+        self.current_theme_name = theme_name
+        self.theme = DARK_THEME if theme_name == 'dark' else LIGHT_THEME
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(build_stylesheet(self.theme))
+        if persist:
+            self.config['theme'] = theme_name
+            self.save_config()
+        # Keep menu checkmarks and toolbar toggle in sync if they already exist
+        if hasattr(self, 'dark_theme_action'):
+            self.dark_theme_action.setChecked(theme_name == 'dark')
+        if hasattr(self, 'light_theme_action'):
+            self.light_theme_action.setChecked(theme_name == 'light')
+        # Repaint any open EPG grid so colors follow the new theme
+        if hasattr(self, '_epg_grid_dialog') and self._epg_grid_dialog is not None:
+            try:
+                self._epg_grid_dialog.apply_theme(self.theme)
+            except RuntimeError:
+                pass  # dialog already closed
+
+    def toggle_theme(self):
+        """Flip between dark and light theme"""
+        new_theme = 'light' if getattr(self, 'current_theme_name', 'dark') == 'dark' else 'dark'
+        self.apply_theme(new_theme)
+
     def setup_ui(self):
         """Setup the UI elements"""
 
-        
-        # Create buttons with icons
-        self.play_btn = QAction(QIcon(self.get_icon('play.svg')), 'Play', self)
-        self.stop_btn = QAction(QIcon(self.get_icon('stop.svg')), 'Stop', self)
-        self.record_btn = QAction(QIcon(self.get_icon('record.svg')), 'Record', self)
-        self.stop_record_btn = QAction(QIcon(self.get_icon('stoprec.svg')), 'Stop Recording', self)
-        
-
-        
         # Create menu bar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
+        channels_menu = menubar.addMenu("Channels")
+        favorites_menu = menubar.addMenu("Favorites")
         view_menu = menubar.addMenu("View")
+        playback_menu = menubar.addMenu("Playback")
+        recording_menu = menubar.addMenu("Recording")
+        epg_menu = menubar.addMenu("EPG")
+        settings_menu = menubar.addMenu("Settings")
         help_menu = menubar.addMenu("Help")
+        self.channels_menu = channels_menu
+        self.favorites_menu = favorites_menu
+        self.settings_menu = settings_menu
 
         # Add User Guide action to Help menu
         user_guide_action = QAction("User Guide", self)
@@ -1065,15 +1358,79 @@ class TVHeadendClient(QMainWindow):
         
         
         
-        # Add Fullscreen action to View menu
+        # Add Fullscreen action to View menu (key handling itself lives in
+        # eventFilter below - no separate shortcut here to avoid the F key
+        # firing twice and toggling fullscreen on/off in the same press)
         fullscreen_action = QAction("Fullscreen", self)
-        fullscreen_action.setShortcut("F")
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
         view_menu.addAction(fullscreen_action)
 
-        # Add Settings action to View menu
-        #settings_action = QAction("Settings", self)
-        ##view_menu.addAction(settings_action)
+        view_menu.addSeparator()
+
+        # Theme submenu (color scheme switch)
+        theme_menu = view_menu.addMenu("Color Scheme")
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+
+        self.dark_theme_action = QAction("Dark", self)
+        self.dark_theme_action.setCheckable(True)
+        self.dark_theme_action.setChecked(getattr(self, 'current_theme_name', 'dark') == 'dark')
+        self.dark_theme_action.triggered.connect(lambda: self.apply_theme('dark'))
+        theme_group.addAction(self.dark_theme_action)
+        theme_menu.addAction(self.dark_theme_action)
+
+        self.light_theme_action = QAction("Light", self)
+        self.light_theme_action.setCheckable(True)
+        self.light_theme_action.setChecked(getattr(self, 'current_theme_name', 'dark') == 'light')
+        self.light_theme_action.triggered.connect(lambda: self.apply_theme('light'))
+        theme_group.addAction(self.light_theme_action)
+        theme_menu.addAction(self.light_theme_action)
+
+        view_menu.addSeparator()
+        show_channels_action = QAction("All Channels...", self)
+        show_channels_action.triggered.connect(self.show_channel_dialog)
+        view_menu.addAction(show_channels_action)
+
+        # Playback menu (also mirrored as icon buttons in the toolbar below)
+        play_action_menu = QAction("Play", self)
+        play_action_menu.triggered.connect(lambda: self.play_btn.trigger())
+        playback_menu.addAction(play_action_menu)
+        stop_action_menu = QAction("Stop", self)
+        stop_action_menu.triggered.connect(self.stop_playback)
+        playback_menu.addAction(stop_action_menu)
+        playback_menu.addSeparator()
+        mute_action_menu = QAction("Toggle Mute", self)
+        mute_action_menu.triggered.connect(self.toggle_mute)
+        playback_menu.addAction(mute_action_menu)
+
+        # Recording menu (server-side "instant record" is scheduled via
+        # the EPG Guide instead - the old start/stop-now buttons never
+        # worked reliably against Tvheadend, same as in the original app)
+        start_local_rec_action_menu = QAction("Start Local Recording", self)
+        start_local_rec_action_menu.triggered.connect(lambda: self.start_local_recording())
+        recording_menu.addAction(start_local_rec_action_menu)
+        stop_local_rec_action_menu = QAction("Stop Local Recording", self)
+        stop_local_rec_action_menu.triggered.connect(self.stop_local_recording)
+        recording_menu.addAction(stop_local_rec_action_menu)
+        recording_menu.addSeparator()
+        dvr_status_action_menu = QAction("Recording Status...", self)
+        dvr_status_action_menu.triggered.connect(self.show_dvr_status)
+        recording_menu.addAction(dvr_status_action_menu)
+
+        # EPG menu
+        epg_guide_action_menu = QAction("Program Guide (All Channels)...", self)
+        epg_guide_action_menu.setShortcut("Ctrl+G")
+        epg_guide_action_menu.triggered.connect(self.show_epg_grid)
+        epg_menu.addAction(epg_guide_action_menu)
+
+        # Settings menu: server management lives here now instead of the
+        # old left-hand panel
+        manage_servers_action = QAction("Manage Servers...", self)
+        manage_servers_action.triggered.connect(self.manage_servers)
+        settings_menu.addAction(manage_servers_action)
+        self.server_menu = settings_menu.addMenu("Active Server")
+        self.server_action_group = QActionGroup(self)
+        self.server_action_group.setExclusive(True)
         
         # Create actions
         exit_action = QAction("Exit", self)
@@ -1083,47 +1440,130 @@ class TVHeadendClient(QMainWindow):
             exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        # --- Toolbar (icon toolbar below the menu bar) ---
+        # This replaces the old left-hand button panels: play/stop,
+        # server + local recording, mute/volume and fullscreen all live
+        # here now as small icon-only controls.
+        toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("mainToolbar")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(22, 22))
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.addToolBar(toolbar)
+
+        self.play_btn = QAction(QIcon(self.get_icon('play.svg')), "Play", self)
+        self.play_btn.setToolTip("Play selected channel")
+        self.play_btn.triggered.connect(
+            lambda: self.play_channel_by_data(
+                self.channel_list.item(self.channel_list.currentRow(), 1).data(Qt.UserRole)
+                if self.channel_list.currentRow() >= 0
+                else (self.channel_list.item(0, 1).data(Qt.UserRole) if self.channel_list.rowCount() > 0 else None)
+            )
+        )
+        toolbar.addAction(self.play_btn)
+
+        self.stop_btn = QAction(QIcon(self.get_icon('stop.svg')), "Stop", self)
+        self.stop_btn.setToolTip("Stop playback")
+        self.stop_btn.triggered.connect(self.stop_playback)
+        toolbar.addAction(self.stop_btn)
+
+        toolbar.addSeparator()
+
+        self.start_local_record_btn = QAction(QIcon(self.get_icon('reclocal.svg')), "Local Record", self)
+        self.start_local_record_btn.setToolTip("Start local recording")
+        self.start_local_record_btn.triggered.connect(lambda: self.start_local_recording())
+        toolbar.addAction(self.start_local_record_btn)
+
+        self.stop_local_record_btn = QAction(QIcon(self.get_icon('stopreclocal.svg')), "Stop Local Record", self)
+        self.stop_local_record_btn.setToolTip("Stop local recording")
+        self.stop_local_record_btn.triggered.connect(self.stop_local_recording)
+        toolbar.addAction(self.stop_local_record_btn)
+
+        toolbar.addSeparator()
+
+        self.tb_epg_action = QAction(QIcon(self.get_icon('epg.svg')), "Guide", self)
+        self.tb_epg_action.setToolTip("Program Guide (all channels)")
+        self.tb_epg_action.triggered.connect(self.show_epg_grid)
+        toolbar.addAction(self.tb_epg_action)
+
+        toolbar.addSeparator()
+
+        self.mute_btn = QAction(QIcon(self.get_icon('unmute.svg')), "Mute", self)
+        self.mute_btn.setToolTip("Mute")
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.triggered.connect(self.toggle_mute)
+        toolbar.addAction(self.mute_btn)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setFixedWidth(110)
+        self.volume_slider.setToolTip("Volume")
+        self.volume_slider.valueChanged.connect(self.on_volume_changed)
+        toolbar.addWidget(self.volume_slider)
+        # The slider was set above *before* connecting valueChanged, so no
+        # signal fired - VLC was still at its own default even though the
+        # slider itself could show a different value. Apply it explicitly
+        # once so the slider position and actual volume match. Always
+        # starts at 100% regardless of any previously saved value.
+        self.on_volume_changed(self.volume_slider.value())
+
+        toolbar.addSeparator()
+
+        self.tb_fullscreen_action = QAction(QIcon(self.get_icon('fullscreen.svg')), "Fullscreen", self)
+        self.tb_fullscreen_action.setToolTip("Toggle fullscreen")
+        self.tb_fullscreen_action.triggered.connect(self.toggle_fullscreen)
+        toolbar.addAction(self.tb_fullscreen_action)
+
+        # Spacer pushes the theme toggle to the far right
+        tb_spacer = QWidget()
+        tb_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(tb_spacer)
+
+        self.tb_theme_action = QAction(QIcon(self.get_icon('theme.svg')), "Toggle Theme", self)
+        self.tb_theme_action.setToolTip("Switch between Dark and Light color scheme")
+        self.tb_theme_action.triggered.connect(self.toggle_theme)
+        toolbar.addAction(self.tb_theme_action)
         
         # Create main widget and layout
         main_widget = QWidget()
+        main_widget.setObjectName("centralArea")
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
-        
-        # Create splitter for resizable panes
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Left pane
-        left_pane = QFrame()
-        left_pane.setFrameStyle(QFrame.Panel | QFrame.Raised)
-        left_layout = QVBoxLayout(left_pane)
-        
-        # Server selection with add/remove buttons
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # --- Channel list + server selector: no longer a visible left
+        # column. They stay fully functional but live inside a separate
+        # "All Channels" window opened from the Channels/View menu, so
+        # the video gets the full width.
+        self.channel_dialog = QDialog(self)
+        self.channel_dialog.setWindowTitle("Channels")
+        self.channel_dialog.resize(420, 640)
+        channel_dialog_layout = QVBoxLayout(self.channel_dialog)
+
         server_layout = QHBoxLayout()
         self.server_combo = QComboBox()
         self.server_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for server in self.servers:
             self.server_combo.addItem(server['name'])
-        
-        # Connect server combo box change signal
         self.server_combo.currentIndexChanged.connect(self.on_server_changed)
-        
+
         manage_servers_btn = QToolButton()
         manage_servers_btn.clicked.connect(self.manage_servers)
-        
         server_layout.addWidget(QLabel("Server:"))
         server_layout.addWidget(self.server_combo)
-        manage_servers_btn.setText("⚙️")  # Unicode settings icon
-        manage_servers_btn.setStyleSheet("font-size: 18px;")  # Make icon bigger
+        manage_servers_btn.setText("\u2699")
+        manage_servers_btn.setStyleSheet("font-size: 18px;")
         manage_servers_btn.setToolTip("Manage servers")
         server_layout.addWidget(manage_servers_btn)
-        left_layout.addLayout(server_layout)
-        
-    
+        channel_dialog_layout.addLayout(server_layout)
 
         # Channel list
         self.channel_list = QTableWidget()
+        self.channel_list.setObjectName("channelList")
         self.channel_list.setColumnCount(2)
-        self.channel_list.setHorizontalHeaderLabels(['', 'Channel Name'])
+        self.channel_list.setHorizontalHeaderLabels(['#', 'Channel Name'])
         self.channel_list.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.channel_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.channel_list.verticalHeader().setVisible(False)
@@ -1131,23 +1571,25 @@ class TVHeadendClient(QMainWindow):
         self.channel_list.setSelectionMode(QTableWidget.SingleSelection)
         self.channel_list.setSortingEnabled(True)
         self.channel_list.setEditTriggers(QTableWidget.NoEditTriggers)
-        
+        self.channel_list.setAlternatingRowColors(True)
+        self.channel_list.setShowGrid(False)
+
         # Connect double-click to play
         self.channel_list.itemDoubleClicked.connect(self.play_channel_from_table)
-        
+
         # Connect context menu
         self.channel_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.channel_list.customContextMenuRequested.connect(self.show_channel_context_menu)
-        
-        left_layout.addWidget(QLabel(""))
-        left_layout.addWidget(self.channel_list)
-        
-        # Right pane
+
+        channel_dialog_layout.addWidget(self.channel_list)
+
+        # Right pane (the only thing visible in the main window now)
         right_pane = QFrame()
-        right_pane.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        right_pane.setFrameStyle(QFrame.NoFrame)
         right_layout = QVBoxLayout(right_pane)
         right_layout.setObjectName("right_layout")
-        
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
         # VLC player widget
         self.video_frame = QWidget()
         self.video_frame.setStyleSheet("""
@@ -1156,167 +1598,20 @@ class TVHeadendClient(QMainWindow):
             background-position: center;
             background-repeat: no-repeat;
         """)
-        
+
         right_layout.addWidget(self.video_frame)
-        
-        # Player controls
-        controls_layout = QHBoxLayout()
-       # Create frame for play/stop buttons
-        playback_frame = QFrame()
-        playback_frame.setStyleSheet(".QFrame{border: 1px solid grey; border-radius: 8px;}");
-        playback_frame.setWindowTitle("Playback")
-        playback_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
-        playback_frame.setLineWidth(5)  # Make frame thicker
-        playback_layout = QHBoxLayout(playback_frame)
-        
-        # Play button
-        self.play_btn = QPushButton()
-        self.play_btn.setFixedSize(48, 48)
-        self.play_btn.setIcon(QIcon(f"{self.icons_dir}/play.svg"))
-        self.play_btn.setIconSize(QSize(48, 48))
-        self.play_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.play_btn.clicked.connect(lambda: self.play_channel_by_data(
-            self.channel_list.currentItem().data(Qt.UserRole) if self.channel_list.currentItem() 
-            else self.channel_list.item(0, 1).data(Qt.UserRole) if self.channel_list.rowCount() > 0 
-            else None))
-        self.play_btn.setToolTip("Play selected channel")
-        playback_layout.addWidget(self.play_btn)
-        
-        # Stop button
-        self.stop_btn = QPushButton()
-        self.stop_btn.setFixedSize(48, 48)
-        self.stop_btn.setIcon(QIcon(f"{self.icons_dir}/stop.svg"))
-        self.stop_btn.setIconSize(QSize(48, 48))
-        self.stop_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_btn.clicked.connect(self.media_player.stop)
-        self.stop_btn.setToolTip("Stop playback")
-        playback_layout.addWidget(self.stop_btn)
-        
-        controls_layout.addWidget(playback_frame)
-        
-        # Create frame for record buttons
-        record_frame = QFrame()
-        record_frame.setStyleSheet(".QFrame{border: 1px solid grey; border-radius: 8px;}");
-        record_frame.setWindowTitle("Recording")
-        record_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
-        record_frame.setLineWidth(5)  # Make frame thicker
-        record_layout = QHBoxLayout(record_frame)
-        
-        # Start Record button
-        self.start_record_btn = QPushButton()
-        self.start_record_btn.setFixedSize(48, 48)  # Remove extra parenthesis
-        self.start_record_btn.setIcon(QIcon(f"{self.icons_dir}/record.svg"))
-        self.start_record_btn.setIconSize(QSize(48, 48))
-        self.start_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.start_record_btn.setToolTip("Start Recording")
-        self.start_record_btn.clicked.connect(self.start_recording)
-        record_layout.addWidget(self.start_record_btn)
+        layout.addWidget(right_pane)
 
-        # Stop Record button 
-        self.stop_record_btn = QPushButton()
-        self.stop_record_btn.setFixedSize(48, 48)  # Remove extra parenthesis
-        self.stop_record_btn.setIcon(QIcon(f"{self.icons_dir}/stoprec.svg"))
-        self.stop_record_btn.setIconSize(QSize(48, 48))
-        self.stop_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_record_btn.setToolTip("Stop Recording")
-        self.stop_record_btn.clicked.connect(self.stop_recording)
-        record_layout.addWidget(self.stop_record_btn)
-        
-        controls_layout.addWidget(record_frame)
-        
-        # Create frame for local record buttons
-        local_record_frame = QFrame()
-        local_record_frame.setStyleSheet(".QFrame{border: 1px solid grey; border-radius: 8px;}");
-        local_record_frame.setWindowTitle("Local Recording")
-        local_record_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
-        local_record_layout = QHBoxLayout(local_record_frame)
-
-        # Start Local Record button
-        self.start_local_record_btn = QPushButton()
-        self.start_local_record_btn.setFixedSize(48, 48)  # Remove extra parenthesis
-        self.start_local_record_btn.setIcon(QIcon(f"{self.icons_dir}/reclocal.svg"))
-        self.start_local_record_btn.setIconSize(QSize(48, 48))
-        self.start_local_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.start_local_record_btn.setToolTip("Start Local Recording")
-        self.start_local_record_btn.clicked.connect(
-            lambda: self.start_local_recording(
-                self.channel_list.currentItem().text() if self.channel_list.currentItem() else None
-            ))
-        local_record_layout.addWidget(self.start_local_record_btn)
-
-        # Stop Local Record button
-        self.stop_local_record_btn = QPushButton()
-        self.stop_local_record_btn.setFixedSize(48, 48)  # Remove extra parenthesis
-        self.stop_local_record_btn.setIcon(QIcon(f"{self.icons_dir}/stopreclocal.svg"))
-        self.stop_local_record_btn.setIconSize(QSize(48, 48))
-        self.stop_local_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_local_record_btn.setToolTip("Stop Local Recording")
-        self.stop_local_record_btn.clicked.connect(self.stop_local_recording)
-        local_record_layout.addWidget(self.stop_local_record_btn)
-
-        controls_layout.addWidget(local_record_frame)
-
-        
-
-        # Volume slider and mute button
-        # Mute button with icons for different states
-        
-        
-        
-        self.mute_btn = QPushButton()
-        self.mute_btn.setIcon(QIcon(f"{self.icons_dir}/unmute.svg"))
-        self.mute_btn.setIconSize(QSize(32, 32))
-        self.mute_btn.setFixedSize(32, 32)  # Remove extra parenthesis
-        self.mute_btn.setCheckable(True)  # Make the button checkable
-        self.mute_btn.clicked.connect(self.toggle_mute)
-        self.mute_btn.setToolTip("Toggle Mute")
-        self.mute_btn.setStyleSheet("QPushButton { border: none; }")
-
-        
-        self.volume_slider = QSlider(Qt.Horizontal)
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(50)
-        self.volume_slider.setFixedWidth(150)  # Set fixed width to make slider less wide
-        self.volume_slider.valueChanged.connect(self.on_volume_changed)
-        
-        # Fullscreen button with icon
-        fullscreen_btn = QPushButton()
-        fullscreen_btn.setIcon(QIcon(f"{self.icons_dir}/fullscreen.svg"))
-        fullscreen_btn.setIconSize(QSize(32, 32))
-        fullscreen_btn.setFixedSize(32, 32)  # Remove extra parenthesis
-        fullscreen_btn.clicked.connect(self.toggle_fullscreen)
-        fullscreen_btn.setToolTip("Toggle Fullscreen")
-        fullscreen_btn.setStyleSheet("QPushButton { border: none; }")
-        
-        controls_layout.addStretch()  # Add stretch to push widgets to the right
-        controls_layout.addWidget(self.mute_btn)
-        controls_layout.addWidget(self.volume_slider)
-        controls_layout.addWidget(fullscreen_btn)
-        right_layout.addLayout(controls_layout)
-        
-        # Add panes to splitter instead of layout
-        splitter.addWidget(left_pane)
-        splitter.addWidget(right_pane)
-        
-        # Set initial sizes (optional)
-        splitter.setSizes([300, 900])  # Adjust these numbers based on your preference
-        
-        # Add splitter to main layout
-        layout.addWidget(splitter)
-        
-        
-        # Buttons removed
-        
         # Status bar setup
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        
+
         # Create a container widget for status bar items
         status_container = QWidget()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(10)  # Space between indicator and text
-        
+
         # Create recording indicator
         self.recording_indicator = QLabel()
         self.recording_indicator.setFixedSize(16, 16)
@@ -1335,26 +1630,53 @@ class TVHeadendClient(QMainWindow):
             }
         """)
         self.recording_indicator.setProperty("recording", False)
-        
+
         # Create status message label
         self.status_label = QLabel("Ready")
-        
+
         # Add widgets to horizontal layout
         status_layout.addWidget(self.recording_indicator)
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()  # This pushes everything to the left
-        
+
         # Add the container to the status bar
         self.statusbar.addWidget(status_container)
-        
+
         # Override showMessage to update our custom label
         def custom_show_message(message, timeout=0):
             self.status_label.setText(message)
         self.statusbar.showMessage = custom_show_message
-        
+
+        # Playback format info (video/audio codec, resolution) is
+        # shows this permanently in the status bar next to the channel name
+        self.format_label = QLabel("")
+        self.format_label.setObjectName("serverLabel")
+        self.statusbar.addPermanentWidget(self.format_label)
+
+        # Signal strength read from Tvheadend's input status API (only
+        # meaningful for DVB/ATSC tuner inputs, blank for IPTV sources)
+        self.signal_label = QLabel("")
+        self.signal_label.setObjectName("serverLabel")
+        self.statusbar.addPermanentWidget(self.signal_label)
+
+        # Permanent clock widget on the right of the status bar
+        self.clock_label = QLabel()
+        self.clock_label.setObjectName("serverLabel")
+        self.statusbar.addPermanentWidget(self.clock_label)
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self.update_status_clock_and_playback_info)
+        self.clock_timer.start(1000)
+        self.update_status_clock_and_playback_info()
+
+        # Poll Tvheadend for tuner signal strength every few seconds
+        self.signal_timer = QTimer(self)
+        self.signal_timer.timeout.connect(self.update_signal_strength)
+        self.signal_timer.start(4000)
+
         # Initialize
         self.fetch_channels()
-        
+        self.rebuild_server_menu()
+
         # Connect channel list double click to play
         
         # Add event filter to video frame for double-click
@@ -1396,7 +1718,7 @@ class TVHeadendClient(QMainWindow):
         
         search_layout.addWidget(search_icon)
         search_layout.addWidget(self.search_box)
-        left_layout.addLayout(search_layout)  # Add to left pane layout
+        channel_dialog_layout.insertLayout(1, search_layout)  # Insert above the channel list in the Channels dialog
         
         # Now style the search box with custom clear button styling
         
@@ -1472,6 +1794,10 @@ class TVHeadendClient(QMainWindow):
             
             # Sort channels by number, then name
             channel_data.sort(key=lambda x: (x['number'] or float('inf'), x['name'].lower()))
+
+            # Keep a copy for other views (e.g. the all-channel EPG guide)
+            self.channels = [c['data'] for c in channel_data]
+            self.rebuild_channels_menu()
             
             # Now add sorted channels to the table
             for idx, channel in enumerate(channel_data):
@@ -1547,12 +1873,22 @@ class TVHeadendClient(QMainWindow):
                 self.channel_list.clear()
         
 
+    def get_recording_channel_name(self):
+        """Best-guess channel name to record: whatever's selected in the
+        channel table, falling back to whatever is currently playing."""
+        current_item = self.channel_list.currentItem()
+        if current_item:
+            return current_item.text()
+        if self.current_channel_data:
+            return self.current_channel_data.get('name')
+        return None
+
     def start_recording(self):
         print("Debug: Starting recording")
         try:
-            # Get selected channel
-            current_channel = self.channel_list.currentItem()
-            if not current_channel:
+            # Get selected channel (falls back to whatever is currently playing)
+            channel_name = self.get_recording_channel_name()
+            if not channel_name:
                 print("Debug: No channel selected for recording")
                 self.statusbar.showMessage("Please select a channel to record")
                 return
@@ -1566,7 +1902,6 @@ class TVHeadendClient(QMainWindow):
             duration = duration_dialog.get_duration()
             print(f"Debug: Selected recording duration: {duration} seconds")
 
-            channel_name = current_channel.text()
             print(f"Debug: Attempting to record channel: {channel_name}")
             
             # Get current server
@@ -1650,72 +1985,58 @@ class TVHeadendClient(QMainWindow):
 
                 # Create a new fullscreen window
     def toggle_fullscreen(self):
-        """Toggle fullscreen mode for VLC player"""
+        """Toggle fullscreen mode for the whole window.
+
+        This intentionally does NOT reparent video_frame into a separate
+        frameless top-level window (the previous approach). Frameless
+        windows are not reliably given keyboard focus by many Linux
+        window managers (GNOME/Mutter included), which is why F/Escape
+        stopped working once entering fullscreen. Using Qt's own
+        showFullScreen()/showNormal() on the main window keeps the video
+        widget's native window handle stable throughout (no set_xwindow
+        churn) and lets the window manager treat it as a normal
+        fullscreen window, so keyboard input keeps working normally.
+        """
+        now_ts = time.time()
+        if getattr(self, '_last_fullscreen_toggle', 0) and now_ts - self._last_fullscreen_toggle < 0.35:
+            print("Debug: Ignoring duplicate fullscreen toggle")
+            return
+        self._last_fullscreen_toggle = now_ts
+
         print(f"Debug: Toggling fullscreen. Current state: {self.is_fullscreen}")
-        
+
         try:
             if not self.is_fullscreen:
-                # Store the video frame's original parent and layout position
-                self.original_parent = self.video_frame.parent()
-                self.original_layout = self.findChild(QVBoxLayout, "right_layout")
-            
-            # Create a new fullscreen window
-                self.fullscreen_window = QWidget()
-                self.fullscreen_window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
-                self.fullscreen_window.installEventFilter(self)
-                layout = QVBoxLayout(self.fullscreen_window)
-                layout.setContentsMargins(0, 0, 0, 0)
-                layout.setSpacing(0)  # Remove spacing between widgets
-            
-                # Move video frame to fullscreen
-                self.video_frame.setParent(self.fullscreen_window)
-                layout.addWidget(self.video_frame)
-            
-                # Show fullscreen
-                QApplication.processEvents()  # Process any pending events
-                self.fullscreen_window.showFullScreen()
-                self.video_frame.show()
-            
-                # Reset VLC window handle for fullscreen
-                if sys.platform.startswith('linux'):
-                    QApplication.processEvents()  # Give X11 time to update
-                    self.media_player.set_xwindow(self.video_frame.winId().__int__())
-                elif sys.platform == "win32":
-                    self.media_player.set_hwnd(self.video_frame.winId().__int__())
-                elif sys.platform == "darwin":
-                    self.media_player.set_nsobject(self.video_frame.winId().__int__())
+                # Hide the chrome and go fullscreen, remembering what was
+                # visible so we can restore it exactly afterwards
+                self._chrome_toolbars = self.findChildren(QToolBar)
+                self._menubar_was_visible = self.menuBar().isVisible()
+                self._statusbar_was_visible = self.statusbar.isVisible()
+                self._toolbar_visibility = {tb: tb.isVisible() for tb in self._chrome_toolbars}
+
+                self.menuBar().setVisible(False)
+                self.statusbar.setVisible(False)
+                for tb in self._chrome_toolbars:
+                    tb.setVisible(False)
+
+                self.showFullScreen()
+                self.setFocus(Qt.OtherFocusReason)
             else:
-                # Remove from fullscreen layout
-                if self.fullscreen_window and self.fullscreen_window.layout():
-                    self.fullscreen_window.layout().removeWidget(self.video_frame)
-                
-                # Find the right pane's layout again
-                right_layout = self.findChild(QVBoxLayout, "right_layout")
-                if right_layout:
-                    # Restore to right pane
-                    self.video_frame.setParent(self.original_parent)
-                    right_layout.insertWidget(0, self.video_frame)
-                    QApplication.processEvents()  # Process any pending events
-                    self.video_frame.show()
-                    
-                    # Reset VLC window handle for normal view
-                    if sys.platform.startswith('linux'):
-                        QApplication.processEvents()  # Give X11 time to update
-                        self.media_player.set_xwindow(self.video_frame.winId().__int__())
-                    elif sys.platform == "win32":
-                        self.media_player.set_hwnd(self.video_frame.winId().__int__())
-                    elif sys.platform == "darwin":
-                        self.media_player.set_nsobject(self.video_frame.winId().__int__())
-                    
-                    # Close fullscreen window
-                    self.fullscreen_window.close()
-                    self.fullscreen_window = None
-                else:
-                    print("Debug: Could not find right_layout")
-            
+                self.showNormal()
+
+                if getattr(self, '_menubar_was_visible', True):
+                    self.menuBar().setVisible(True)
+                if getattr(self, '_statusbar_was_visible', True):
+                    self.statusbar.setVisible(True)
+                for tb, was_visible in getattr(self, '_toolbar_visibility', {}).items():
+                    try:
+                        tb.setVisible(was_visible)
+                    except RuntimeError:
+                        pass  # toolbar was deleted in the meantime
+
             self.is_fullscreen = not self.is_fullscreen
             print(f"Debug: New fullscreen state: {self.is_fullscreen}")
-            
+
         except Exception as e:
             print(f"Debug: Error in toggle_fullscreen: {str(e)}")
             print(f"Debug: Traceback: {traceback.format_exc()}")
@@ -1750,6 +2071,7 @@ class TVHeadendClient(QMainWindow):
             for server in self.servers:
                 print(f"Debug: Adding server to combo: {server['name']}")
                 self.server_combo.addItem(server['name'])
+            self.rebuild_server_menu()
             
             # Refresh channels
             self.fetch_channels()
@@ -1858,11 +2180,16 @@ class TVHeadendClient(QMainWindow):
             
         # Handle key events for both main window and fullscreen window
         if event.type() == event.KeyPress:
+            if event.isAutoRepeat():
+                return True
             if event.key() == Qt.Key_Escape and self.is_fullscreen:
                 self.toggle_fullscreen()
                 return True
             elif event.key() == Qt.Key_F:
                 self.toggle_fullscreen()
+                return True
+            elif event.key() == Qt.Key_Q and (event.modifiers() & Qt.ControlModifier):
+                self.close()
                 return True
             
         return super().eventFilter(obj, event)
@@ -1887,15 +2214,18 @@ class TVHeadendClient(QMainWindow):
         print("Debug: Showing about dialog")
         about_text = (
             "<div style='text-align: center;'>"
-            "<h2>TVHplayer</h2>"
-            "<p>Version 3.5.5</p>"
-            "<p>A powerful and user-friendly TVHeadend client application.</p>"
-            "<p style='margin-top: 20px;'><b>Created by:</b><br>mFat</p>"
+            "<h2>TVHviewer</h2>"
+            "<p>Version 1.0</p>"
+            "<p>A more modern desktop client for Tvheadend. Watch and record live TV.</p>"
+            "<p style='margin-top: 20px;'><b>Fork maintained by:</b><br>"
+            "honeyx \u2014 <a href='https://github.com/honeyx/tvhviewer'>github.com/honeyx/tvhviewer</a></p>"
+            "<p style='margin-top: 20px;'><b>Originally created by:</b><br>"
+            "mFat \u2014 <a href='https://github.com/mfat/tvhplayer'>github.com/mfat/tvhplayer</a><br>"
+            "TVHviewer is a fork of the original TVHplayer project. "
+            "All credit for the original application design and functionality "
+            "belongs to mFat and the TVHplayer contributors.</p>"
             "<p style='margin-top: 20px;'><b>Built with:</b><br>"
             "Python, PyQt5, and VLC</p>"
-            "<p style='margin-top: 20px;'>"
-            "<a href='https://github.com/mfat/tvhplayer'>Project Website</a>"
-            "</p>"
             "<p style='margin-top: 20px; font-size: 11px;'>"
             "This program is free software: you can redistribute it and/or modify "
             "it under the terms of the GNU General Public License as published by "
@@ -1912,7 +2242,7 @@ class TVHeadendClient(QMainWindow):
             "</div>"
         )
         msg = QMessageBox()
-        msg.setWindowTitle("About TVHplayer")
+        msg.setWindowTitle("About TVHviewer")
         msg.setText(about_text)
         msg.setTextFormat(Qt.RichText)
         msg.setMinimumWidth(400)  # Make dialog wider to prevent text wrapping
@@ -2122,9 +2452,11 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to play media: {str(e)}")
 
-    def start_local_recording(self, channel_name):
+    def start_local_recording(self, channel_name=None):
         """Record channel stream to local disk using ffmpeg"""
         try:
+            if not channel_name:
+                channel_name = self.get_recording_channel_name()
             if not channel_name:
                 print("Debug: No channel selected for recording")
                 self.statusbar.showMessage("Please select a channel to record")
@@ -2132,20 +2464,30 @@ class TVHeadendClient(QMainWindow):
 
             print(f"Debug: Starting local recording for channel: {channel_name}")
             
-            # Show file save dialog
+            # Show file save dialog, defaulting to wherever the last
+            # recording was saved (falls back to the home directory)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"recording_{channel_name}_{timestamp}.ts"  # Using .ts format initially
-            
+            default_dir = self.config.get('recording_path', str(Path.home()))
+            if not default_dir or not os.path.isdir(default_dir):
+                default_dir = str(Path.home())
+            default_path = os.path.join(default_dir, default_filename)
+
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Recording As",
-                default_filename,
-                "TS Files (*.ts);;MP4 Files (*.mp4);;All Files (*.*)"
+                default_path,
+                "TS Files (*.ts);;MP4 Files (*.mp4);;All Files (*.*)",
+                options=QFileDialog.DontUseNativeDialog
             )
             
             if not file_path:  # User cancelled
                 print("Debug: Recording cancelled - no file selected")
                 return
+
+            # Remember this location for next time
+            self.config['recording_path'] = os.path.dirname(file_path)
+            self.save_config()
                 
             # Get current server and auth info
             server = self.servers[self.server_combo.currentIndex()]
@@ -2318,7 +2660,7 @@ class TVHeadendClient(QMainWindow):
                             stall_msg = "Recording stalled - attempting restart"
                             QMessageBox.warning(self, "Recording Status", stall_msg)
                             self.stop_local_recording()
-                            self.start_local_recording(self.channel_list.currentItem().text())
+                            self.start_local_recording()
                             return
                     else:
                         self.stall_count = 0
@@ -2378,9 +2720,10 @@ class TVHeadendClient(QMainWindow):
             else:
                 # Return default configuration
                 return {
-                    'volume': 50,
+                    'volume': 100,
                     'last_server': 0,
                     'recording_path': str(Path.home()),
+                    'theme': 'dark',
                     'window_geometry': {
                         'x': 100,
                         'y': 100,
@@ -2395,9 +2738,10 @@ class TVHeadendClient(QMainWindow):
     def get_default_config(self):
         """Return default configuration"""
         return {
-            'volume': 50,
+            'volume': 100,
             'last_server': 0,
             'recording_path': str(Path.home()),
+            'theme': 'dark',
             'window_geometry': {
                 'x': 100,
                 'y': 100,
@@ -2431,8 +2775,19 @@ class TVHeadendClient(QMainWindow):
                 lambda: self.start_local_recording(channel_data['name']))
             
             # Add EPG action
-            epg_action = menu.addAction("Show EPG")
+            epg_action = menu.addAction("Show EPG (this channel)")
             epg_action.triggered.connect(lambda: self.show_channel_epg(channel_data['name']))
+
+            full_guide_action = menu.addAction("Program Guide (all channels)...")
+            full_guide_action.triggered.connect(self.show_epg_grid)
+
+            menu.addSeparator()
+            if channel_data.get('name') in self.config.get('favorites', []):
+                fav_action = menu.addAction("Remove from Favorites")
+                fav_action.triggered.connect(lambda: self.remove_favorite(channel_data.get('name')))
+            else:
+                fav_action = menu.addAction("Add to Favorites")
+                fav_action.triggered.connect(lambda: self.add_favorite(channel_data.get('name')))
             
             # Show the menu at the cursor position
             menu.exec_(self.channel_list.viewport().mapToGlobal(position))
@@ -2500,6 +2855,238 @@ class TVHeadendClient(QMainWindow):
             print(f"Debug: Error fetching EPG: {str(e)}")
             self.statusbar.showMessage(f"Error fetching EPG: {str(e)}")
 
+    def show_channel_dialog(self):
+        """Show the 'All Channels' window (channel list + server picker)"""
+        self.channel_dialog.show()
+        self.channel_dialog.raise_()
+        self.channel_dialog.activateWindow()
+
+    def rebuild_server_menu(self):
+        """Rebuild the Settings -> Active Server checkable list"""
+        self.server_menu.clear()
+        for action in self.server_action_group.actions():
+            self.server_action_group.removeAction(action)
+        for i, server in enumerate(self.servers):
+            action = QAction(server['name'], self)
+            action.setCheckable(True)
+            action.setChecked(i == self.server_combo.currentIndex())
+            action.triggered.connect(lambda checked, idx=i: self.server_combo.setCurrentIndex(idx))
+            self.server_action_group.addAction(action)
+            self.server_menu.addAction(action)
+
+    def rebuild_channels_menu(self):
+        """Channels menu: a proper scrollable dropdown list of channels
+        (like the original combo-box style), not a giant flat menu that
+        can end up taller than the screen."""
+        self.channels_menu.clear()
+        if not self.channels:
+            empty_action = QAction("(No channels loaded)", self)
+            empty_action.setEnabled(False)
+            self.channels_menu.addAction(empty_action)
+        else:
+            list_widget = QListWidget()
+            list_widget.setMaximumHeight(420)
+            list_widget.setMinimumWidth(260)
+            list_widget.setAlternatingRowColors(True)
+            for channel_data in self.channels:
+                number = channel_data.get('number')
+                label = f"{number}  {channel_data.get('name', '')}" if number else channel_data.get('name', '')
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, channel_data)
+                list_widget.addItem(item)
+            list_widget.itemClicked.connect(self._play_from_channels_menu_list)
+            self._channels_menu_list = list_widget  # keep a reference alive
+            widget_action = QWidgetAction(self.channels_menu)
+            widget_action.setDefaultWidget(list_widget)
+            self.channels_menu.addAction(widget_action)
+        self.channels_menu.addSeparator()
+        all_channels_action = QAction("Open Channel Browser (search)...", self)
+        all_channels_action.triggered.connect(self.show_channel_dialog)
+        self.channels_menu.addAction(all_channels_action)
+        self.rebuild_favorites_menu()
+
+    def _play_from_channels_menu_list(self, item):
+        channel_data = item.data(Qt.UserRole)
+        if channel_data:
+            self.play_channel_by_data(channel_data)
+        self.channels_menu.close()
+
+    def rebuild_favorites_menu(self):
+        """Favorites menu: favorite channels, click to play, plus management"""
+        self.favorites_menu.clear()
+        favorites = self.config.get('favorites', [])
+        by_name = {c.get('name'): c for c in self.channels}
+        added = False
+        for fav_name in favorites:
+            channel_data = by_name.get(fav_name)
+            if not channel_data:
+                continue
+            action = QAction(fav_name, self)
+            action.triggered.connect(lambda checked, cd=channel_data: self.play_channel_by_data(cd))
+            self.favorites_menu.addAction(action)
+            added = True
+        if not added:
+            empty_action = QAction("(No favorites yet)", self)
+            empty_action.setEnabled(False)
+            self.favorites_menu.addAction(empty_action)
+        self.favorites_menu.addSeparator()
+        add_current_action = QAction("Add Current Channel to Favorites", self)
+        add_current_action.triggered.connect(
+            lambda: self.add_favorite(self.current_channel_data.get('name'))
+            if self.current_channel_data else None)
+        add_current_action.setEnabled(self.current_channel_data is not None)
+        self.favorites_menu.addAction(add_current_action)
+        manage_favorites_action = QAction("Manage Favorites...", self)
+        manage_favorites_action.triggered.connect(self.manage_favorites)
+        self.favorites_menu.addAction(manage_favorites_action)
+
+    def add_favorite(self, channel_name):
+        if not channel_name:
+            return
+        favorites = self.config.get('favorites', [])
+        if channel_name not in favorites:
+            favorites.append(channel_name)
+            self.config['favorites'] = favorites
+            self.save_config()
+            self.rebuild_favorites_menu()
+
+    def remove_favorite(self, channel_name):
+        favorites = self.config.get('favorites', [])
+        if channel_name in favorites:
+            favorites.remove(channel_name)
+            self.config['favorites'] = favorites
+            self.save_config()
+            self.rebuild_favorites_menu()
+
+    def manage_favorites(self):
+        """Small dialog to check/uncheck favorite channels"""
+        if not self.channels:
+            QMessageBox.information(self, "No channels loaded",
+                                     "Open 'All Channels...' first so the channel list can load from the server.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Favorites")
+        dialog.resize(340, 480)
+        layout = QVBoxLayout(dialog)
+        list_widget = QListWidget()
+        favorites = set(self.config.get('favorites', []))
+        for channel in self.channels:
+            item = QListWidgetItem(channel.get('name', ''))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if channel.get('name') in favorites else Qt.Unchecked)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+        if dialog.exec_() == QDialog.Accepted:
+            new_favorites = []
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if item.checkState() == Qt.Checked:
+                    new_favorites.append(item.text())
+            self.config['favorites'] = new_favorites
+            self.save_config()
+            self.rebuild_favorites_menu()
+
+    def update_status_clock_and_playback_info(self):
+        """Update the status bar clock and current video/audio format info"""
+        self.clock_label.setText(datetime.now().strftime('%a %d.%m.%Y  %H:%M:%S'))
+        try:
+            if self.media_player is not None and self.media_player.is_playing():
+                size = self.media_player.video_get_size(0)
+                fps = self.media_player.get_fps()
+                parts = []
+                if size and size[0] and size[1]:
+                    parts.append(f"{size[0]}x{size[1]}")
+                if fps:
+                    parts.append(f"{fps:.2f} fps")
+                media = self.media_player.get_media()
+                if media is not None:
+                    tracks = media.tracks_get() if hasattr(media, 'tracks_get') else None
+                    if tracks:
+                        def fourcc_to_str(codec):
+                            try:
+                                return codec.to_bytes(4, 'little').decode('ascii', errors='ignore').strip().upper()
+                            except Exception:
+                                return ''
+                        for track in tracks:
+                            ttype = getattr(track, 'type', None)
+                            if ttype == vlc.TrackType.video:
+                                codec_str = fourcc_to_str(track.codec)
+                                if codec_str:
+                                    parts.append(f"Video: {codec_str}")
+                            elif ttype == vlc.TrackType.audio:
+                                codec_str = fourcc_to_str(track.codec)
+                                if codec_str:
+                                    parts.append(f"Audio: {codec_str}")
+                self.format_label.setText("  \u2022  ".join(parts))
+            else:
+                self.format_label.setText("")
+        except Exception:
+            # Format probing is best-effort - never let it break the clock
+            self.format_label.setText("")
+
+    def update_signal_strength(self):
+        """Poll Tvheadend's input status for tuner signal strength"""
+        try:
+            if not self.servers or not hasattr(self, 'server_combo'):
+                return
+            if self.media_player is None or not self.media_player.is_playing():
+                self.signal_label.setText("")
+                return
+            server = self.servers[self.server_combo.currentIndex()]
+            auth = None
+            if server.get('username') or server.get('password'):
+                auth = (server.get('username', ''), server.get('password', ''))
+            base_url = server['url']
+            if not base_url.startswith(('http://', 'https://')):
+                base_url = f"http://{base_url}"
+            response = requests.get(f'{base_url}/api/status/inputs', auth=auth, timeout=3)
+            if response.status_code != 200:
+                self.signal_label.setText("")
+                return
+            entries = response.json().get('entries', [])
+            active = [e for e in entries if e.get('signal') or e.get('snr')]
+            if not active:
+                self.signal_label.setText("")
+                return
+            entry = active[0]
+            signal = entry.get('signal')
+            snr = entry.get('snr')
+            parts = []
+            if signal is not None:
+                # Tvheadend reports signal in 1/65535 units on some inputs, percent on others
+                pct = signal / 655.35 if signal > 100 else signal
+                parts.append(f"Signal {pct:.0f}%")
+            if snr is not None:
+                parts.append(f"SNR {snr}")
+            self.signal_label.setText("  \u2022  ".join(parts))
+        except Exception:
+            self.signal_label.setText("")
+
+    def show_epg_grid(self):
+        """Open the program guide: all channels + a scrollable timeline"""
+        if not self.servers:
+            self.statusbar.showMessage("No servers configured")
+            return
+        server = self.servers[self.server_combo.currentIndex()]
+
+        # Reuse an already-open guide window instead of stacking duplicates
+        if self._epg_grid_dialog is not None:
+            try:
+                self._epg_grid_dialog.close()
+            except RuntimeError:
+                pass
+            self._epg_grid_dialog = None
+
+        dialog = EPGGridDialog(server, self.theme, self)
+        self._epg_grid_dialog = dialog
+        dialog.finished.connect(lambda _: setattr(self, '_epg_grid_dialog', None))
+        dialog.show()
+        dialog.load_data()
+
     def play_channel_from_table(self, item):
         """Play channel from table selection"""
         row = item.row()
@@ -2510,6 +3097,7 @@ class TVHeadendClient(QMainWindow):
     def play_channel_by_data(self, channel_data):
         """Play channel using channel data"""
         try:
+            self.current_channel_data = channel_data
             server = self.servers[self.server_combo.currentIndex()]
             server_url = server['url']
             print(f"Debug: Playing channel from server: {server_url}")
@@ -2546,6 +3134,8 @@ class TVHeadendClient(QMainWindow):
                 self.media_player.play()
                 print(f"Debug: Started playback")
                 self.statusbar.showMessage(f"Playing: {channel_data['name']}")
+                if hasattr(self, 'favorites_menu'):
+                    self.rebuild_favorites_menu()
             else:
                 print(f"Debug: Channel not found: {channel_data['name']}")
                 self.statusbar.showMessage("Channel not found")
@@ -2619,6 +3209,573 @@ class TVHeadendClient(QMainWindow):
             print(f"Error checking hardware acceleration: {e}")
             print(f"Traceback: {traceback.format_exc()}")
 
+
+
+def _epg_text(value, fallback=''):
+    """TVHeadend EPG text fields come either as a plain string or as
+    {'eng': '...'} language dicts - normalize to a plain string."""
+    if isinstance(value, dict):
+        if value:
+            return next(iter(value.values()))
+        return fallback
+    if value:
+        return str(value)
+    return fallback
+
+
+# Layout constants for the all-channel EPG timeline grid
+EPG_PX_PER_MIN = 4
+EPG_ROW_HEIGHT = 44
+EPG_CHANNEL_COL_WIDTH = 190
+EPG_HEADER_HEIGHT = 36
+EPG_WINDOW_HOURS = 48
+EPG_NEWSPAPER_SLOT_MINUTES = 30
+
+
+class SyncedScrollArea(QScrollArea):
+    """A QScrollArea that forwards its own wheel events to another scroll
+    area, so the channel column and the time ruler scroll together with
+    the main program grid as if it were a single widget."""
+    def __init__(self, sync_target_getter, parent=None):
+        super().__init__(parent)
+        self._sync_target_getter = sync_target_getter
+
+    def wheelEvent(self, event):
+        target = self._sync_target_getter()
+        if target is not None:
+            QApplication.sendEvent(target.viewport(), event)
+        else:
+            super().wheelEvent(event)
+
+
+class EPGRulerWidget(QWidget):
+    """Draws the hour/day timeline header above the program grid"""
+    def __init__(self, window_start, total_minutes, theme, parent=None):
+        super().__init__(parent)
+        self.window_start = window_start
+        self.total_minutes = total_minutes
+        self.theme = theme
+        self.setFixedHeight(EPG_HEADER_HEIGHT)
+        self.setMinimumWidth(int(total_minutes * EPG_PX_PER_MIN))
+
+    def set_theme(self, theme):
+        self.theme = theme
+        self.update()
+
+    def set_window(self, window_start, total_minutes):
+        self.window_start = window_start
+        self.total_minutes = total_minutes
+        self.setMinimumWidth(int(total_minutes * EPG_PX_PER_MIN))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.theme['header_bg']))
+        font = QFont()
+        font.setPointSize(9)
+        painter.setFont(font)
+
+        current = self.window_start.replace(minute=0, second=0, microsecond=0)
+        end_time = self.window_start + timedelta(minutes=self.total_minutes)
+        last_day = None
+        while current <= end_time:
+            x = (current - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+            painter.setPen(QPen(QColor(self.theme['border'])))
+            painter.drawLine(int(x), 0, int(x), EPG_HEADER_HEIGHT)
+            painter.setPen(QColor(self.theme['text']))
+            painter.drawText(int(x) + 4, EPG_HEADER_HEIGHT - 6, current.strftime('%H:%M'))
+            if current.day != last_day:
+                painter.setPen(QColor(self.theme['accent']))
+                painter.drawText(int(x) + 4, 13, current.strftime('%a %d.%m'))
+                last_day = current.day
+            current += timedelta(hours=1)
+        painter.end()
+
+
+class EPGChannelColumn(QWidget):
+    """Left column listing channel names/numbers, one row per channel,
+    kept in vertical sync with the program grid."""
+    def __init__(self, channels, theme, parent=None):
+        super().__init__(parent)
+        self.channels = channels
+        self.theme = theme
+        self.setFixedWidth(EPG_CHANNEL_COL_WIDTH)
+        self.setMinimumHeight(max(1, len(channels)) * EPG_ROW_HEIGHT)
+
+    def set_theme(self, theme):
+        self.theme = theme
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.theme['panel_bg']))
+        font = QFont()
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        for i, ch in enumerate(self.channels):
+            y = i * EPG_ROW_HEIGHT
+            bg = QColor(self.theme['alt_row']) if i % 2 else QColor(self.theme['panel_bg'])
+            painter.fillRect(0, y, self.width(), EPG_ROW_HEIGHT, bg)
+            painter.setPen(QPen(QColor(self.theme['border'])))
+            painter.drawLine(0, y + EPG_ROW_HEIGHT, self.width(), y + EPG_ROW_HEIGHT)
+            painter.setPen(QColor(self.theme['text']))
+            number = ch.get('number')
+            label = f"{number}  {ch.get('name', '')}" if number else ch.get('name', '')
+            elided = metrics.elidedText(label, Qt.ElideRight, self.width() - 12)
+            painter.drawText(8, y + EPG_ROW_HEIGHT // 2 + 4, elided)
+        painter.end()
+
+
+class EPGGridCanvas(QWidget):
+    """Paints the actual program blocks: one row per channel, positioned
+    and sized proportionally to their start/stop time along a shared
+    timeline - the multi-channel EPG grid."""
+    programClicked = pyqtSignal(dict, dict)  # event data, channel data
+
+    def __init__(self, channels, events_by_channel, window_start, total_minutes, theme, parent=None):
+        super().__init__(parent)
+        self.channels = channels
+        self.events_by_channel = events_by_channel
+        self.window_start = window_start
+        self.total_minutes = total_minutes
+        self.theme = theme
+        self.setMinimumSize(int(total_minutes * EPG_PX_PER_MIN), max(1, len(channels)) * EPG_ROW_HEIGHT)
+        self._blocks = []  # (QRectF, event, channel) for hit-testing clicks
+
+    def set_theme(self, theme):
+        self.theme = theme
+        self.update()
+
+    def set_window(self, window_start, total_minutes):
+        self.window_start = window_start
+        self.total_minutes = total_minutes
+        self.setMinimumSize(int(total_minutes * EPG_PX_PER_MIN), max(1, len(self.channels)) * EPG_ROW_HEIGHT)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.theme['panel_bg']))
+        self._blocks = []
+
+        now = datetime.now()
+        window_end = self.window_start + timedelta(minutes=self.total_minutes)
+
+        font = QFont()
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+
+        for row, channel in enumerate(self.channels):
+            y = row * EPG_ROW_HEIGHT
+            bg = QColor(self.theme['alt_row']) if row % 2 else QColor(self.theme['panel_bg'])
+            painter.fillRect(0, y, self.width(), EPG_ROW_HEIGHT, bg)
+            painter.setPen(QPen(QColor(self.theme['border'])))
+            painter.drawLine(0, y + EPG_ROW_HEIGHT, self.width(), y + EPG_ROW_HEIGHT)
+
+            events = self.events_by_channel.get(channel.get('uuid'), [])
+            for ev in events:
+                try:
+                    ev_start = datetime.fromtimestamp(ev['start'])
+                    ev_stop = datetime.fromtimestamp(ev['stop'])
+                except (KeyError, TypeError, ValueError, OSError):
+                    continue
+                if ev_stop <= self.window_start or ev_start >= window_end:
+                    continue
+                clip_start = max(ev_start, self.window_start)
+                clip_stop = min(ev_stop, window_end)
+                x1 = (clip_start - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+                x2 = (clip_stop - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+                width = max(2, x2 - x1)
+                rect = QRectF(x1, y + 2, width, EPG_ROW_HEIGHT - 4)
+
+                is_now = ev_start <= now <= ev_stop
+                block_color = QColor(self.theme['epg_now']) if is_now else QColor(self.theme['epg_future'])
+                painter.setPen(QPen(QColor(self.theme['epg_border'])))
+                painter.setBrush(QBrush(block_color))
+                painter.drawRoundedRect(rect, 3, 3)
+
+                title = _epg_text(ev.get('title'), 'No title')
+                text_rect = rect.adjusted(6, 0, -6, 0)
+                painter.setPen(QColor(self.theme['text']))
+                elided = metrics.elidedText(title, Qt.ElideRight, max(0, int(text_rect.width())))
+                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+
+                self._blocks.append((rect, ev, channel))
+
+        if self.window_start <= now <= window_end:
+            now_x = (now - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+            painter.setPen(QPen(QColor(self.theme['now_line']), 2))
+            painter.drawLine(int(now_x), 0, int(now_x), self.height())
+
+        painter.end()
+
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        for rect, ev, channel in self._blocks:
+            if rect.contains(pos):
+                self.programClicked.emit(ev, channel)
+                return
+        super().mousePressEvent(event)
+
+
+class ProgramInfoDialog(QDialog):
+    """Popup shown when clicking a program block: details + quick actions"""
+    def __init__(self, event_data, channel, server, main_window, parent=None):
+        super().__init__(parent)
+        self.event_data = event_data
+        self.channel = channel
+        self.server = server
+        self.main_window = main_window
+        self.setWindowTitle(_epg_text(event_data.get('title'), 'Program'))
+        self.setModal(True)
+        self.resize(420, 260)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        title = _epg_text(self.event_data.get('title'), 'Unknown title')
+        subtitle = _epg_text(self.event_data.get('subtitle'), '')
+        description = _epg_text(
+            self.event_data.get('description'),
+            _epg_text(self.event_data.get('summary'), ''))
+
+        start_time = datetime.fromtimestamp(self.event_data['start']).strftime('%a %d.%m.  %H:%M')
+        stop_time = datetime.fromtimestamp(self.event_data['stop']).strftime('%H:%M')
+
+        title_label = QLabel(f"<b>{title}</b>")
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
+
+        if subtitle:
+            sub_label = QLabel(subtitle)
+            sub_label.setWordWrap(True)
+            layout.addWidget(sub_label)
+
+        channel_label = QLabel(f"{self.channel.get('name', '')}  \u2022  {start_time} - {stop_time}")
+        channel_label.setObjectName("serverLabel")
+        layout.addWidget(channel_label)
+
+        desc_label = QLabel(description or "No description available")
+        desc_label.setWordWrap(True)
+        desc_label.setAlignment(Qt.AlignTop)
+        layout.addWidget(desc_label, stretch=1)
+
+        btn_layout = QHBoxLayout()
+        play_btn = QPushButton("Play Channel")
+        play_btn.clicked.connect(self.play_channel)
+        record_btn = QPushButton("Schedule Recording")
+        record_btn.clicked.connect(self.schedule_recording)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(play_btn)
+        btn_layout.addWidget(record_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+    def play_channel(self):
+        if self.main_window is not None:
+            self.main_window.play_channel_by_data(self.channel)
+        self.accept()
+
+    def schedule_recording(self):
+        try:
+            auth = None
+            if self.server.get('username') or self.server.get('password'):
+                auth = (self.server.get('username', ''), self.server.get('password', ''))
+            title = _epg_text(self.event_data.get('title'), 'Scheduled Recording')
+            description = _epg_text(self.event_data.get('description'), '')
+            conf_data = {
+                "start": self.event_data['start'],
+                "stop": self.event_data['stop'],
+                "channel": self.event_data.get('channelUuid', self.channel.get('uuid')),
+                "title": {"eng": title},
+                "description": {"eng": description},
+                "comment": "Scheduled via TVHplayer",
+            }
+            base_url = self.server['url']
+            if not base_url.startswith(('http://', 'https://')):
+                base_url = f"http://{base_url}"
+            data = {'conf': json.dumps(conf_data)}
+            response = requests.post(f'{base_url}/api/dvr/entry/create', data=data, auth=auth)
+            if response.status_code == 200:
+                QMessageBox.information(self, "Success", f"Recording scheduled for {title}")
+            else:
+                QMessageBox.warning(self, "Error", f"Failed to schedule recording: {response.text}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to schedule recording: {e}")
+
+
+class EPGGridDialog(QDialog):
+    """Program guide: all channels as rows against one
+    shared, scrollable timeline (instead of one dialog per channel)."""
+    def __init__(self, server, theme, main_window=None):
+        super().__init__(main_window)
+        self.server = server
+        self.theme = theme
+        self.main_window = main_window
+        self.setWindowTitle(f"Program Guide - {server.get('name', '')}")
+        self.setModal(False)
+        self.resize(1050, 620)
+        self.channels = []
+        self.events_by_channel = {}
+        self.window_start = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        self.total_minutes = EPG_WINDOW_HOURS * 60
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        toolbar_layout = QHBoxLayout()
+        self.prev_btn = QPushButton("\u25c0 6h")
+        self.prev_btn.clicked.connect(lambda: self.scroll_by_hours(-6))
+        self.now_btn = QPushButton("Now")
+        self.now_btn.clicked.connect(self.jump_to_now)
+        self.next_btn = QPushButton("6h \u25b6")
+        self.next_btn.clicked.connect(lambda: self.scroll_by_hours(6))
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.load_data)
+
+        # View toggle: Timeline (channels as rows) vs. Newspaper (channels
+        # as columns, time running down the rows - the classic TV-guide page)
+        self.view_toggle_group = QActionGroup(self)
+        self.timeline_view_btn = QPushButton("Timeline")
+        self.timeline_view_btn.setCheckable(True)
+        self.timeline_view_btn.setChecked(True)
+        self.timeline_view_btn.clicked.connect(lambda: self.set_view_mode('timeline'))
+        self.newspaper_view_btn = QPushButton("Guide (Columns)")
+        self.newspaper_view_btn.setCheckable(True)
+        self.newspaper_view_btn.clicked.connect(lambda: self.set_view_mode('newspaper'))
+
+        self.info_label = QLabel("Loading program guide...")
+        self.info_label.setObjectName("serverLabel")
+
+        toolbar_layout.addWidget(self.prev_btn)
+        toolbar_layout.addWidget(self.now_btn)
+        toolbar_layout.addWidget(self.next_btn)
+        toolbar_layout.addWidget(self.refresh_btn)
+        toolbar_layout.addSpacing(12)
+        toolbar_layout.addWidget(self.timeline_view_btn)
+        toolbar_layout.addWidget(self.newspaper_view_btn)
+        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.info_label)
+        layout.addLayout(toolbar_layout)
+
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack)
+
+        # --- Page 1: Timeline view (channels as rows) ---
+        timeline_page = QWidget()
+        grid_layout = QGridLayout(timeline_page)
+        grid_layout.setSpacing(0)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+
+        corner = QWidget()
+        corner.setFixedSize(EPG_CHANNEL_COL_WIDTH, EPG_HEADER_HEIGHT)
+        grid_layout.addWidget(corner, 0, 0)
+
+        self.ruler = EPGRulerWidget(self.window_start, self.total_minutes, self.theme)
+        self.ruler_scroll = SyncedScrollArea(lambda: self.grid_scroll, parent=self)
+        self.ruler_scroll.setWidget(self.ruler)
+        self.ruler_scroll.setFixedHeight(EPG_HEADER_HEIGHT)
+        self.ruler_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ruler_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ruler_scroll.setWidgetResizable(False)
+        self.ruler_scroll.setFrameShape(QFrame.NoFrame)
+        grid_layout.addWidget(self.ruler_scroll, 0, 1)
+
+        self.channel_column = EPGChannelColumn([], self.theme)
+        self.channel_scroll = SyncedScrollArea(lambda: self.grid_scroll, parent=self)
+        self.channel_scroll.setWidget(self.channel_column)
+        self.channel_scroll.setFixedWidth(EPG_CHANNEL_COL_WIDTH)
+        self.channel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.channel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.channel_scroll.setWidgetResizable(False)
+        self.channel_scroll.setFrameShape(QFrame.NoFrame)
+        grid_layout.addWidget(self.channel_scroll, 1, 0)
+
+        self.canvas = EPGGridCanvas([], {}, self.window_start, self.total_minutes, self.theme)
+        self.canvas.programClicked.connect(self.on_program_clicked)
+        self.grid_scroll = QScrollArea()
+        self.grid_scroll.setWidget(self.canvas)
+        self.grid_scroll.setWidgetResizable(False)
+        self.grid_scroll.setFrameShape(QFrame.NoFrame)
+        grid_layout.addWidget(self.grid_scroll, 1, 1)
+
+        grid_layout.setColumnStretch(1, 1)
+        grid_layout.setRowStretch(1, 1)
+
+        self.grid_scroll.horizontalScrollBar().valueChanged.connect(
+            self.ruler_scroll.horizontalScrollBar().setValue)
+        self.grid_scroll.verticalScrollBar().valueChanged.connect(
+            self.channel_scroll.verticalScrollBar().setValue)
+
+        self.stack.addWidget(timeline_page)
+
+        # --- Page 2: Newspaper view (channels as columns, time as rows) ---
+        self.newspaper_table = QTableWidget()
+        self.newspaper_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.newspaper_table.setSelectionMode(QTableWidget.NoSelection)
+        self.newspaper_table.setWordWrap(True)
+        self.newspaper_table.verticalHeader().setDefaultSectionSize(30)
+        self.newspaper_table.horizontalHeader().setDefaultSectionSize(170)
+        # Pixel-based scrolling so our time->offset math (used for "Now"
+        # and the 6h prev/next buttons) lines up with the actual scrollbar
+        self.newspaper_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.newspaper_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.newspaper_table.cellClicked.connect(self._on_newspaper_cell_clicked)
+        self._newspaper_cell_events = {}
+        self.stack.addWidget(self.newspaper_table)
+
+    def set_view_mode(self, mode):
+        self.timeline_view_btn.setChecked(mode == 'timeline')
+        self.newspaper_view_btn.setChecked(mode == 'newspaper')
+        self.stack.setCurrentIndex(0 if mode == 'timeline' else 1)
+
+    def apply_theme(self, theme):
+        self.theme = theme
+        self.ruler.set_theme(theme)
+        self.channel_column.set_theme(theme)
+        self.canvas.set_theme(theme)
+        self.refresh_newspaper_table()
+
+    def load_data(self):
+        self.info_label.setText("Loading program guide...")
+        QApplication.processEvents()
+        try:
+            auth = None
+            if self.server.get('username') or self.server.get('password'):
+                auth = (self.server.get('username', ''), self.server.get('password', ''))
+            base_url = self.server['url']
+            if not base_url.startswith(('http://', 'https://')):
+                base_url = f"http://{base_url}"
+
+            # All channels
+            ch_resp = requests.get(f'{base_url}/api/channel/grid?limit=10000', auth=auth, timeout=10)
+            ch_entries = ch_resp.json().get('entries', [])
+            self.channels = sorted(
+                ch_entries,
+                key=lambda c: (c.get('number') or float('inf'), (c.get('name') or '').lower())
+            )
+
+            # EPG events for ALL channels in a single request (this is the
+            # part that replaces the old per-channel "Show EPG" popup)
+            epg_resp = requests.get(
+                f'{base_url}/api/epg/events/grid',
+                params={'limit': 5000},
+                auth=auth, timeout=15
+            )
+            events = epg_resp.json().get('entries', [])
+
+            events_by_channel = {}
+            for ev in events:
+                uuid = ev.get('channelUuid')
+                if not uuid:
+                    continue
+                events_by_channel.setdefault(uuid, []).append(ev)
+            for uuid in events_by_channel:
+                events_by_channel[uuid].sort(key=lambda e: e.get('start', 0))
+            self.events_by_channel = events_by_channel
+
+            self.channel_column.channels = self.channels
+            self.channel_column.setMinimumHeight(max(1, len(self.channels)) * EPG_ROW_HEIGHT)
+            self.canvas.channels = self.channels
+            self.canvas.events_by_channel = events_by_channel
+            self.canvas.setMinimumSize(
+                int(self.total_minutes * EPG_PX_PER_MIN), max(1, len(self.channels)) * EPG_ROW_HEIGHT
+            )
+            self.channel_column.update()
+            self.canvas.update()
+            self.refresh_newspaper_table()
+            self.info_label.setText(f"{len(self.channels)} channels \u2022 {len(events)} programs")
+            self.jump_to_now()
+        except Exception as e:
+            self.info_label.setText(f"Error loading guide: {e}")
+
+    def refresh_newspaper_table(self):
+        """Fill the newspaper-style grid: channels as columns, half-hour
+        time slots as rows, programs spanning multiple rows via cell merge."""
+        table = self.newspaper_table
+        table.clearContents()
+        table.setColumnCount(len(self.channels))
+        table.setHorizontalHeaderLabels([c.get('name', '') for c in self.channels])
+
+        num_slots = max(1, int(self.total_minutes // EPG_NEWSPAPER_SLOT_MINUTES))
+        table.setRowCount(num_slots)
+        row_labels = []
+        last_day = None
+        for i in range(num_slots):
+            slot_time = self.window_start + timedelta(minutes=i * EPG_NEWSPAPER_SLOT_MINUTES)
+            if slot_time.day != last_day:
+                row_labels.append(slot_time.strftime('%a %H:%M'))
+                last_day = slot_time.day
+            else:
+                row_labels.append(slot_time.strftime('%H:%M'))
+        table.setVerticalHeaderLabels(row_labels)
+
+        self._newspaper_cell_events = {}
+        window_end = self.window_start + timedelta(minutes=self.total_minutes)
+
+        for col, channel in enumerate(self.channels):
+            events = self.events_by_channel.get(channel.get('uuid'), [])
+            for ev in events:
+                try:
+                    ev_start = datetime.fromtimestamp(ev['start'])
+                    ev_stop = datetime.fromtimestamp(ev['stop'])
+                except (KeyError, TypeError, ValueError, OSError):
+                    continue
+                if ev_stop <= self.window_start or ev_start >= window_end:
+                    continue
+                clip_start = max(ev_start, self.window_start)
+                clip_stop = min(ev_stop, window_end)
+                start_row = int((clip_start - self.window_start).total_seconds() // 60 // EPG_NEWSPAPER_SLOT_MINUTES)
+                minutes_span = (clip_stop - clip_start).total_seconds() / 60
+                span = max(1, -(-int(minutes_span) // EPG_NEWSPAPER_SLOT_MINUTES))
+                if start_row < 0 or start_row >= num_slots:
+                    continue
+                span = min(span, num_slots - start_row)
+
+                title = _epg_text(ev.get('title'), 'No title')
+                item = QTableWidgetItem(title)
+                item.setToolTip(title)
+                is_now = ev_start <= datetime.now() <= ev_stop
+                bg = self.theme['epg_now'] if is_now else self.theme['epg_future']
+                item.setBackground(QBrush(QColor(bg)))
+                item.setForeground(QBrush(QColor(self.theme['text'])))
+                table.setItem(start_row, col, item)
+                if span > 1:
+                    table.setSpan(start_row, col, span, 1)
+                self._newspaper_cell_events[(start_row, col)] = (ev, channel)
+
+    def _on_newspaper_cell_clicked(self, row, col):
+        data = self._newspaper_cell_events.get((row, col))
+        if data:
+            event_data, channel = data
+            self.on_program_clicked(event_data, channel)
+
+    def jump_to_now(self):
+        now = datetime.now()
+        x = (now - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+        target = max(0, int(x - 100))
+        self.grid_scroll.horizontalScrollBar().setValue(target)
+
+        row_height = self.newspaper_table.verticalHeader().defaultSectionSize()
+        minutes_since_start = (now - self.window_start).total_seconds() / 60
+        y = minutes_since_start / EPG_NEWSPAPER_SLOT_MINUTES * row_height
+        self.newspaper_table.verticalScrollBar().setValue(max(0, int(y - row_height * 3)))
+
+    def scroll_by_hours(self, hours):
+        bar = self.grid_scroll.horizontalScrollBar()
+        bar.setValue(bar.value() + int(hours * 60 * EPG_PX_PER_MIN))
+        v_bar = self.newspaper_table.verticalScrollBar()
+        rows = int(hours * 60 / EPG_NEWSPAPER_SLOT_MINUTES)
+        v_bar.setValue(v_bar.value() + rows * self.newspaper_table.verticalHeader().defaultSectionSize())
+
+    def on_program_clicked(self, event_data, channel):
+        popup = ProgramInfoDialog(event_data, channel, self.server, self.main_window, self)
+        popup.exec_()
 
 
 class EPGDialog(QDialog):
