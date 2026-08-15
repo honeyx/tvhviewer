@@ -1,5 +1,18 @@
 from datetime import datetime, timedelta
 import sys
+import os
+
+# When running as a PyInstaller-frozen executable, make sure Qt can find
+# its platform plugin (qwindows.dll / libqxcb.so etc.). PyInstaller's
+# --collect-all PyQt5 bundles it under PyQt5/Qt5/plugins, which isn't
+# where Qt looks by default - without this, the app fails to start with
+# "no Qt platform plugin could be initialized".
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _bundled_plugin_dir = os.path.join(sys._MEIPASS, 'PyQt5', 'Qt5', 'plugins')
+    if os.path.isdir(_bundled_plugin_dir):
+        os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(_bundled_plugin_dir, 'platforms')
+        os.environ.setdefault('QT_PLUGIN_PATH', _bundled_plugin_dir)
+
 import vlc
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
