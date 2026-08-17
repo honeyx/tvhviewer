@@ -63,6 +63,26 @@ jobs:
             tvhplayer/tvhplayer.py
         shell: pwsh
 
+      - name: Copy Qt runtime DLLs next to the exe (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # qwindows.dll (the Qt platform plugin) was being *found* but
+          # failing to *load* - almost always because DLLs it depends on
+          # (Qt5Core/Qt5Gui/the ANGLE OpenGL translation libs) end up
+          # nested under a different folder than --collect-all placed it
+          # in, so Windows' DLL search never finds them. Copying every
+          # PyQt5 Qt5 runtime DLL directly next to the .exe (the first
+          # place Windows always looks) sidesteps that entirely.
+          $pyqt5_bin = python -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'bin'))"
+          Copy-Item "$pyqt5_bin\*.dll" -Destination "dist/${{ matrix.artifact_name }}/" -Force
+          $platforms_src = "dist/${{ matrix.artifact_name }}/_internal/PyQt5/Qt5/plugins/platforms"
+          $platforms_dst = "dist/${{ matrix.artifact_name }}/platforms"
+          if (Test-Path $platforms_src) {
+            New-Item -ItemType Directory -Force -Path $platforms_dst | Out-Null
+            Copy-Item "$platforms_src\*" -Destination $platforms_dst -Force
+          }
+        shell: pwsh
+
       - name: Zip Windows build folder
         if: runner.os == 'Windows'
         run: |
@@ -81,6 +101,38 @@ jobs:
       # --- Linux: also build a real installable .deb package (small,
       # relies on system-installed PyQt5/VLC via apt, instead of bundling
       # everything like the portable PyInstaller binary above).
+      - name: Build real AppImage (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp "dist/${{ matrix.artifact_name }}" AppDir/usr/bin/tvhviewer
+          chmod +x AppDir/usr/bin/tvhviewer
+          cp tvhplayer.png AppDir/tvhviewer.png
+
+          cat > AppDir/tvhviewer.desktop << 'EOF'
+          [Desktop Entry]
+          Name=TVHviewer
+          Comment=More modern desktop client for Tvheadend. Watch and record live TV
+          Exec=tvhviewer
+          Icon=tvhviewer
+          Terminal=false
+          Type=Application
+          Categories=AudioVideo;Player;TV;
+          EOF
+
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "$HERE/usr/bin/tvhviewer" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          # GitHub's runners don't have FUSE, so extract-and-run instead
+          ./appimagetool --appimage-extract-and-run AppDir "tvhviewer-${{ github.ref_name }}-x86_64.AppImage"
+        shell: bash
+
       - name: Build .deb package (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -166,6 +218,7 @@ jobs:
             dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
             dist/${{ matrix.artifact_name }}
             tvhviewer_*_all.deb
+            tvhviewer-*-x86_64.AppImage
           if-no-files-found: ignore
 
       - name: Attach to GitHub Release
@@ -178,5 +231,6 @@ jobs:
             dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
             dist/${{ matrix.artifact_name }}
             tvhviewer_*_all.deb
+            tvhviewer-*-x86_64.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
