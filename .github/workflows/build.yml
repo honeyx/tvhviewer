@@ -57,12 +57,7 @@ jobs:
       - name: Build executable (Windows)
         if: runner.os == 'Windows'
         run: |
-          # NOTE: --windowed is intentionally left off right now (temporary
-          # debug build) so a console window stays open and shows Qt's
-          # real diagnostic output (QT_DEBUG_PLUGINS=1, set in the app
-          # itself) instead of just a generic "failed to start" dialog.
-          # Put --windowed back once the underlying issue is fixed.
-          pyinstaller --onedir --name=${{ matrix.artifact_name }} `
+          pyinstaller --onedir --windowed --name=${{ matrix.artifact_name }} `
             --add-data "icons;icons" `
             --collect-all PyQt5 `
             tvhplayer/tvhplayer.py
