@@ -12,11 +12,6 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     if os.path.isdir(_bundled_plugin_dir):
         os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(_bundled_plugin_dir, 'platforms')
         os.environ.setdefault('QT_PLUGIN_PATH', _bundled_plugin_dir)
-    # TEMPORARY while debugging the Windows "no Qt platform plugin could
-    # be initialized" issue: print Qt's own diagnostic info about exactly
-    # which plugin/DLL fails and why, instead of just the generic error
-    # dialog. Safe to remove once that's fixed.
-    os.environ['QT_DEBUG_PLUGINS'] = '1'
 
 import vlc
 from PyQt5.QtWidgets import (
@@ -4009,10 +4004,13 @@ class RecordingStatusDialog(QDialog):
 def main():
     """Main entry point for the application"""
     try:
-        # Force the application to use XCB instead of Wayland
-        # This helps with VLC integration under Wayland
-        QCoreApplication.setAttribute(Qt.AA_X11InitThreads, True)
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        # Force XCB instead of Wayland on Linux - this helps VLC's video
+        # embedding work correctly there. Windows/macOS have no XCB
+        # plugin at all, so setting this unconditionally broke every
+        # Windows build ("Could not find the Qt platform plugin 'xcb'").
+        if sys.platform.startswith('linux'):
+            QCoreApplication.setAttribute(Qt.AA_X11InitThreads, True)
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
         
         app = QApplication(sys.argv)
         player = TVHeadendClient()
