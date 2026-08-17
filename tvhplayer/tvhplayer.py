@@ -2533,9 +2533,18 @@ class TVHeadendClient(QMainWindow):
             
             stream_url = f'{server_url}/stream/channel/{channel_uuid}'
             
+            # Prefer a bundled ffmpeg (shipped next to the app in the
+            # Windows build) over relying purely on PATH
+            ffmpeg_exe = 'ffmpeg'
+            if getattr(sys, 'frozen', False):
+                bundled_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+                bundled_path = os.path.join(os.path.dirname(sys.executable), bundled_name)
+                if os.path.isfile(bundled_path):
+                    ffmpeg_exe = bundled_path
+
             # Build ffmpeg command
             ffmpeg_cmd = [
-                'ffmpeg',
+                ffmpeg_exe,
                 '-hide_banner',
                 '-loglevel', 'warning',
                 '-nostats',
@@ -2607,6 +2616,12 @@ class TVHeadendClient(QMainWindow):
             self.recording_status_dialog.finished.connect(self.stop_local_recording)
             self.recording_status_dialog.show()
             
+        except FileNotFoundError:
+            msg = ("Local recording needs ffmpeg, which isn't installed (or not on PATH). "
+                   "Install it from https://ffmpeg.org/download.html and try again.")
+            print(f"Debug: Local recording error: ffmpeg not found")
+            self.statusbar.showMessage(msg)
+            QMessageBox.warning(self, "ffmpeg not found", msg)
         except Exception as e:
             print(f"Debug: Local recording error: {str(e)}")
             print(f"Debug: Error type: {type(e)}")
