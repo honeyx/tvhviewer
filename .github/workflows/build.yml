@@ -83,10 +83,29 @@ jobs:
           }
         shell: pwsh
 
-      - name: Zip Windows build folder
+      - name: Bundle ffmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
-          Compress-Archive -Path "dist/${{ matrix.artifact_name }}/*" -DestinationPath "dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip"
+          # Local recording shells out to ffmpeg. Rather than making every
+          # user install and PATH-configure it themselves, ship a static
+          # build right next to the app.
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_extracted"
+          $ffmpegExe = Get-ChildItem -Path "ffmpeg_extracted" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName -Destination "dist/${{ matrix.artifact_name }}/ffmpeg.exe" -Force
+        shell: pwsh
+
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y
+        shell: pwsh
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version installer\windows_installer.iss
+          Copy-Item "installer\installer_output\tvhviewer-$version-setup.exe" -Destination "dist\"
         shell: pwsh
 
       - name: Build executable (macOS/Linux)
@@ -214,8 +233,7 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}-${{ github.ref_name }}
           path: |
-            dist/${{ matrix.artifact_name }}.exe
-            dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
+            dist/tvhviewer-*-setup.exe
             dist/${{ matrix.artifact_name }}
             tvhviewer_*_all.deb
             tvhviewer-*-x86_64.AppImage
@@ -227,8 +245,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "TVHviewer ${{ github.ref_name }}"
           files: |
-            dist/${{ matrix.artifact_name }}.exe
-            dist/${{ matrix.artifact_name }}-${{ github.ref_name }}-windows.zip
+            dist/tvhviewer-*-setup.exe
             dist/${{ matrix.artifact_name }}
             tvhviewer_*_all.deb
             tvhviewer-*-x86_64.AppImage
