@@ -2649,14 +2649,18 @@ class TVHeadendClient(QMainWindow):
                 print("Debug: Recording file does not exist")
                 # Only show warning if more than 10 seconds have passed
                 if elapsed_time > 10:
-                    if hasattr(self, 'recording_status_dialog'):
-                        self.recording_status_dialog.close()
+                    # Grab ffmpeg's diagnostic output *before* closing the
+                    # status dialog - closing it triggers stop_local_recording()
+                    # via a signal connection, which clears self.ffmpeg_process
                     stderr_text = ''
-                    if hasattr(self, 'ffmpeg_process') and self.ffmpeg_process.poll() is not None:
-                        _, stderr = self.ffmpeg_process.communicate()
+                    proc = getattr(self, 'ffmpeg_process', None)
+                    if proc is not None and proc.poll() is not None:
+                        _, stderr = proc.communicate()
                         stderr_text = stderr.decode(errors='replace').strip() if stderr else ''
                         if len(stderr_text) > 2000:
                             stderr_text = '...\n' + stderr_text[-2000:]
+                    if hasattr(self, 'recording_status_dialog'):
+                        self.recording_status_dialog.close()
                     msg = "Recording file was never created - ffmpeg likely failed to start the stream."
                     if stderr_text:
                         msg += f"\n\n{stderr_text}"
