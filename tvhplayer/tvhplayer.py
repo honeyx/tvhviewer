@@ -2753,6 +2753,8 @@ class TVHeadendClient(QMainWindow):
                 del self.last_file_size
             if hasattr(self, 'stall_count'):
                 del self.stall_count
+            if hasattr(self, 'recording_start_time'):
+                del self.recording_start_time
             
             self.statusbar.showMessage("Local recording stopped")
             self.stop_recording_indicator()
