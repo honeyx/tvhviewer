@@ -2595,12 +2595,17 @@ class TVHeadendClient(QMainWindow):
             print(f"Debug: {safe_cmd}")
             
             # Start ffmpeg process
-            self.ffmpeg_process = subprocess.Popen(
-                ffmpeg_cmd,
+            popen_kwargs = dict(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=10**8
             )
+            if sys.platform == 'win32':
+                # ffmpeg.exe is a console app - without this Windows pops
+                # up a distracting (and, since we pipe its output, empty)
+                # console window every time a recording starts.
+                popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, **popen_kwargs)
             
             # Start monitoring process
             self.recording_monitor = QTimer()
@@ -2646,7 +2651,16 @@ class TVHeadendClient(QMainWindow):
                 if elapsed_time > 10:
                     if hasattr(self, 'recording_status_dialog'):
                         self.recording_status_dialog.close()
-                    QMessageBox.warning(self, "Local Recording Status", "Recording file does not exist")
+                    stderr_text = ''
+                    if hasattr(self, 'ffmpeg_process') and self.ffmpeg_process.poll() is not None:
+                        _, stderr = self.ffmpeg_process.communicate()
+                        stderr_text = stderr.decode(errors='replace').strip() if stderr else ''
+                        if len(stderr_text) > 2000:
+                            stderr_text = '...\n' + stderr_text[-2000:]
+                    msg = "Recording file was never created - ffmpeg likely failed to start the stream."
+                    if stderr_text:
+                        msg += f"\n\n{stderr_text}"
+                    QMessageBox.warning(self, "Local Recording Status", msg)
                     return
                 else:
                     print(f"Debug: Waiting for file creation ({int(elapsed_time)} seconds elapsed)")
@@ -2674,7 +2688,12 @@ class TVHeadendClient(QMainWindow):
                     if file_size == 0 or return_code != 0:
                         print("Debug: Recording failed - stopping processes")
                         self.stop_local_recording()
-                        error_msg = "Recording failed - check console for errors"
+                        stderr_text = stderr.decode(errors='replace').strip() if stderr else ''
+                        if len(stderr_text) > 2000:  # keep the dialog readable
+                            stderr_text = '...\n' + stderr_text[-2000:]
+                        error_msg = f"Recording failed (ffmpeg exit code {return_code})."
+                        if stderr_text:
+                            error_msg += f"\n\n{stderr_text}"
                         QMessageBox.critical(self, "Recording Error", error_msg)
                         return
                     
