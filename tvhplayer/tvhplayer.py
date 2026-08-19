@@ -1444,6 +1444,13 @@ class TVHeadendClient(QMainWindow):
         self.server_menu = settings_menu.addMenu("Active Server")
         self.server_action_group = QActionGroup(self)
         self.server_action_group.setExclusive(True)
+
+        settings_menu.addSeparator()
+        self.auto_resume_action = QAction("Resume last channel on startup", self)
+        self.auto_resume_action.setCheckable(True)
+        self.auto_resume_action.setChecked(self.config.get('auto_resume_last_channel', False))
+        self.auto_resume_action.triggered.connect(self.toggle_auto_resume)
+        settings_menu.addAction(self.auto_resume_action)
         
         # Create actions
         exit_action = QAction("Exit", self)
@@ -1805,6 +1812,7 @@ class TVHeadendClient(QMainWindow):
             # Keep a copy for other views (e.g. the all-channel EPG guide)
             self.channels = [c['data'] for c in channel_data]
             self.rebuild_channels_menu()
+            self.maybe_auto_resume_last_channel()
             
             # Now add sorted channels to the table
             for idx, channel in enumerate(channel_data):
@@ -1894,6 +1902,26 @@ class TVHeadendClient(QMainWindow):
         else:
             channel_data = None
         self.play_channel_by_data(channel_data)
+
+    def maybe_auto_resume_last_channel(self):
+        """On first launch only (not on every channel-list refresh),
+        optionally resume whatever channel was playing last session."""
+        if getattr(self, '_did_auto_resume', False):
+            return
+        self._did_auto_resume = True
+        if not self.config.get('auto_resume_last_channel', False):
+            return
+        last_name = self.config.get('last_channel_name')
+        if not last_name:
+            return
+        for channel_data in self.channels:
+            if channel_data.get('name') == last_name:
+                self.play_channel_by_data(channel_data)
+                break
+
+    def toggle_auto_resume(self, checked):
+        self.config['auto_resume_last_channel'] = checked
+        self.save_config()
 
     def get_recording_channel_name(self):
         """Best-guess channel name to record: whatever's selected in the
@@ -3160,6 +3188,9 @@ class TVHeadendClient(QMainWindow):
         """Play channel using channel data"""
         try:
             self.current_channel_data = channel_data
+            if channel_data and channel_data.get('name'):
+                self.config['last_channel_name'] = channel_data.get('name')
+                self.save_config()
             server = self.servers[self.server_combo.currentIndex()]
             server_url = server['url']
             print(f"Debug: Playing channel from server: {server_url}")
@@ -3458,7 +3489,15 @@ class EPGGridCanvas(QWidget):
                 painter.drawRoundedRect(rect, 3, 3)
 
                 title = _epg_text(ev.get('title'), 'No title')
-                text_rect = rect.adjusted(6, 0, -6, 0)
+                # Keep the title readable even when the program started
+                # long before the visible/scrolled area: anchor the text
+                # to whatever part of the block is actually on screen
+                # right now (event.rect() is the currently-exposed area
+                # in the same widget-local coordinates), instead of the
+                # program's true (possibly off-screen) start position.
+                visible_left = max(rect.left(), event.rect().left())
+                visible_right = min(rect.right(), event.rect().right())
+                text_rect = QRectF(visible_left + 6, rect.top(), max(0, visible_right - visible_left - 12), rect.height())
                 painter.setPen(QColor(self.theme['text']))
                 elided = metrics.elidedText(title, Qt.ElideRight, max(0, int(text_rect.width())))
                 painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
