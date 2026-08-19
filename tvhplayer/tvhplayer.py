@@ -1467,13 +1467,7 @@ class TVHeadendClient(QMainWindow):
 
         self.play_btn = QAction(QIcon(self.get_icon('play.svg')), "Play", self)
         self.play_btn.setToolTip("Play selected channel")
-        self.play_btn.triggered.connect(
-            lambda: self.play_channel_by_data(
-                self.channel_list.item(self.channel_list.currentRow(), 1).data(Qt.UserRole)
-                if self.channel_list.currentRow() >= 0
-                else (self.channel_list.item(0, 1).data(Qt.UserRole) if self.channel_list.rowCount() > 0 else None)
-            )
-        )
+        self.play_btn.triggered.connect(self.play_button_clicked)
         toolbar.addAction(self.play_btn)
 
         self.stop_btn = QAction(QIcon(self.get_icon('stop.svg')), "Stop", self)
@@ -1885,6 +1879,21 @@ class TVHeadendClient(QMainWindow):
                 self.statusbar.showMessage("Connection aborted")
                 self.channel_list.clear()
         
+
+    def play_button_clicked(self):
+        """Resume whatever channel was last playing (e.g. after Stop),
+        falling back to the selected/first channel if nothing has played
+        yet this session."""
+        if self.current_channel_data:
+            self.play_channel_by_data(self.current_channel_data)
+            return
+        if self.channel_list.currentRow() >= 0:
+            channel_data = self.channel_list.item(self.channel_list.currentRow(), 1).data(Qt.UserRole)
+        elif self.channel_list.rowCount() > 0:
+            channel_data = self.channel_list.item(0, 1).data(Qt.UserRole)
+        else:
+            channel_data = None
+        self.play_channel_by_data(channel_data)
 
     def get_recording_channel_name(self):
         """Best-guess channel name to record: whatever's selected in the
