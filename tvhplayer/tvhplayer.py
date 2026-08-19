@@ -2684,8 +2684,10 @@ class TVHeadendClient(QMainWindow):
             
             if not os.path.exists(file_path):
                 print("Debug: Recording file does not exist")
-                # Only show warning if more than 10 seconds have passed
-                if elapsed_time > 10:
+                # Only show warning if more than 20 seconds have passed.
+                # (Was 10s - too tight under real-world system load, where
+                # ffmpeg startup can take longer, especially on Windows.)
+                if elapsed_time > 20:
                     # Grab ffmpeg's diagnostic output *before* closing the
                     # status dialog - closing it triggers stop_local_recording()
                     # via a signal connection, which clears self.ffmpeg_process
@@ -2743,7 +2745,11 @@ class TVHeadendClient(QMainWindow):
                     if file_size == self.last_file_size:
                         print("Debug: File size not increasing - potential stall")
                         self.stall_count = getattr(self, 'stall_count', 0) + 1
-                        if self.stall_count > 5:  # After 10 seconds of no growth
+                        # After 30 seconds of no growth (was 10s - brief
+                        # network/CPU hiccups, e.g. while browsing at the
+                        # same time, were being mistaken for a real stall
+                        # and triggering a disruptive restart).
+                        if self.stall_count > 15:
                             print("Debug: Recording stalled - restarting")
                             stall_msg = "Recording stalled - attempting restart"
                             QMessageBox.warning(self, "Recording Status", stall_msg)
