@@ -2684,10 +2684,13 @@ class TVHeadendClient(QMainWindow):
             
             if not os.path.exists(file_path):
                 print("Debug: Recording file does not exist")
-                # Only show warning if more than 20 seconds have passed.
-                # (Was 10s - too tight under real-world system load, where
-                # ffmpeg startup can take longer, especially on Windows.)
-                if elapsed_time > 20:
+                # Only show warning after a generous grace period. On
+                # Windows, the first few ffmpeg launches after a fresh
+                # install can be noticeably slower - Windows Defender
+                # scans a newly-seen executable before letting it run -
+                # so a short timeout here mostly just meant nagging the
+                # user with a false alarm during exactly that warm-up.
+                if elapsed_time > 45:
                     # Grab ffmpeg's diagnostic output *before* closing the
                     # status dialog - closing it triggers stop_local_recording()
                     # via a signal connection, which clears self.ffmpeg_process
