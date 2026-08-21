@@ -18,7 +18,7 @@ See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in thi
 - Server status, tuner signal strength, and video/audio format shown
   in the status bar
 - Cross-platform (Linux, Windows) — this fork has mainly been
-  tested on Linux (Zorin OS / Ubuntu)
+  tested on Linux (Zorin OS / Ubuntu) and Windows 11
 
 ## Install
 
