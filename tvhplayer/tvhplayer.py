@@ -31,6 +31,7 @@ import requests
 # not Qt's compiled resource system, so no resources_rc import is needed.
 import time
 import subprocess
+import threading
 import os
 import traceback
 from pathlib import Path
@@ -2643,6 +2644,26 @@ class TVHeadendClient(QMainWindow):
                 # console window every time a recording starts.
                 popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
             self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, **popen_kwargs)
+
+            # Continuously drain stderr in the background so we can show
+            # ffmpeg's *live* diagnostic output even if it's still running
+            # but stuck/hanging - not just after it has already exited.
+            self._ffmpeg_stderr_lines = []
+            def _drain_stderr(proc, sink):
+                try:
+                    for raw_line in iter(proc.stderr.readline, b''):
+                        if not raw_line:
+                            break
+                        sink.append(raw_line.decode(errors='replace').rstrip())
+                        if len(sink) > 200:  # keep memory/dialog size bounded
+                            del sink[:len(sink) - 200]
+                except Exception:
+                    pass
+            threading.Thread(
+                target=_drain_stderr,
+                args=(self.ffmpeg_process, self._ffmpeg_stderr_lines),
+                daemon=True
+            ).start()
             
             # Start monitoring process
             self.recording_monitor = QTimer()
@@ -2691,21 +2712,23 @@ class TVHeadendClient(QMainWindow):
                 # so a short timeout here mostly just meant nagging the
                 # user with a false alarm during exactly that warm-up.
                 if elapsed_time > 45:
-                    # Grab ffmpeg's diagnostic output *before* closing the
-                    # status dialog - closing it triggers stop_local_recording()
-                    # via a signal connection, which clears self.ffmpeg_process
-                    stderr_text = ''
+                    # Grab whatever ffmpeg has printed so far - via the
+                    # background drain thread, this works even if ffmpeg
+                    # is still running (genuinely stuck/hanging), not just
+                    # after it has exited.
+                    stderr_lines = getattr(self, '_ffmpeg_stderr_lines', [])
+                    stderr_text = '\n'.join(stderr_lines[-40:])
                     proc = getattr(self, 'ffmpeg_process', None)
-                    if proc is not None and proc.poll() is not None:
-                        _, stderr = proc.communicate()
-                        stderr_text = stderr.decode(errors='replace').strip() if stderr else ''
-                        if len(stderr_text) > 2000:
-                            stderr_text = '...\n' + stderr_text[-2000:]
+                    still_running = proc is not None and proc.poll() is None
                     if hasattr(self, 'recording_status_dialog'):
                         self.recording_status_dialog.close()
-                    msg = "Recording file was never created - ffmpeg likely failed to start the stream."
+                    if still_running:
+                        msg = ("Recording file was never created - ffmpeg is still running but "
+                               "hasn't produced any output yet.")
+                    else:
+                        msg = "Recording file was never created - ffmpeg likely failed to start the stream."
                     if stderr_text:
-                        msg += f"\n\n{stderr_text}"
+                        msg += f"\n\nffmpeg output so far:\n{stderr_text}"
                     QMessageBox.warning(self, "Local Recording Status", msg)
                     return
                 else:
@@ -2725,16 +2748,18 @@ class TVHeadendClient(QMainWindow):
             if hasattr(self, 'ffmpeg_process'):
                 return_code = self.ffmpeg_process.poll()
                 if return_code is not None:
-                    # Process has ended
-                    _, stderr = self.ffmpeg_process.communicate()
+                    # Process has ended. Don't call .communicate() here -
+                    # the background drain thread is already reading
+                    # stderr continuously, so read from its buffer instead
+                    # of racing it for the same pipe.
+                    stderr_text = '\n'.join(getattr(self, '_ffmpeg_stderr_lines', [])[-40:])
                     print(f"Debug: FFmpeg process ended with return code: {return_code}")
-                    if stderr:
-                        print(f"Debug: FFmpeg error output: {stderr.decode()}")
+                    if stderr_text:
+                        print(f"Debug: FFmpeg error output: {stderr_text}")
                     
                     if file_size == 0 or return_code != 0:
                         print("Debug: Recording failed - stopping processes")
                         self.stop_local_recording()
-                        stderr_text = stderr.decode(errors='replace').strip() if stderr else ''
                         if len(stderr_text) > 2000:  # keep the dialog readable
                             stderr_text = '...\n' + stderr_text[-2000:]
                         error_msg = f"Recording failed (ffmpeg exit code {return_code})."
