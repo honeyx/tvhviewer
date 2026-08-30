@@ -1813,7 +1813,7 @@ class TVHeadendClient(QMainWindow):
             # Keep a copy for other views (e.g. the all-channel EPG guide)
             self.channels = [c['data'] for c in channel_data]
             self.rebuild_channels_menu()
-            self.maybe_auto_resume_last_channel()
+            resumed = self.maybe_auto_resume_last_channel()
             
             # Now add sorted channels to the table
             for idx, channel in enumerate(channel_data):
@@ -1866,7 +1866,8 @@ class TVHeadendClient(QMainWindow):
                 else:
                     print(f"Row {row}: Missing items")
             
-            self.statusbar.showMessage("Channels loaded successfully")
+            if not resumed:
+                self.statusbar.showMessage("Channels loaded successfully")
             
         except Exception as e:
             print(f"Debug: Error in fetch_channels: {str(e)}")
@@ -1906,19 +1907,21 @@ class TVHeadendClient(QMainWindow):
 
     def maybe_auto_resume_last_channel(self):
         """On first launch only (not on every channel-list refresh),
-        optionally resume whatever channel was playing last session."""
+        optionally resume whatever channel was playing last session.
+        Returns True if a channel was actually resumed."""
         if getattr(self, '_did_auto_resume', False):
-            return
+            return False
         self._did_auto_resume = True
         if not self.config.get('auto_resume_last_channel', False):
-            return
+            return False
         last_name = self.config.get('last_channel_name')
         if not last_name:
-            return
+            return False
         for channel_data in self.channels:
             if channel_data.get('name') == last_name:
                 self.play_channel_by_data(channel_data)
-                break
+                return True
+        return False
 
     def toggle_auto_resume(self, checked):
         self.config['auto_resume_last_channel'] = checked
@@ -3796,13 +3799,28 @@ class EPGGridDialog(QDialog):
             )
 
             # EPG events for ALL channels in a single request (this is the
-            # part that replaces the old per-channel "Show EPG" popup)
-            epg_resp = requests.get(
-                f'{base_url}/api/epg/events/grid',
-                params={'limit': 5000},
-                auth=auth, timeout=15
-            )
-            events = epg_resp.json().get('entries', [])
+            # part that replaces the old per-channel "Show EPG" popup).
+            # Paginated because a single "limit" was getting exhausted
+            # well before the full time window when there are many
+            # channels - a single 5000-event page might only cover ~24h
+            # of combined listings, silently truncating everything after
+            # that even though the server has more.
+            events = []
+            offset = 0
+            batch_size = 5000
+            while True:
+                epg_resp = requests.get(
+                    f'{base_url}/api/epg/events/grid',
+                    params={'start': offset, 'limit': batch_size},
+                    auth=auth, timeout=15
+                )
+                batch = epg_resp.json().get('entries', [])
+                events.extend(batch)
+                if len(batch) < batch_size:
+                    break
+                offset += batch_size
+                if offset >= 50000:  # generous safety cap against runaway loops
+                    break
 
             events_by_channel = {}
             for ev in events:
