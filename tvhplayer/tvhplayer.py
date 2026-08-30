@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
     QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics
 import json
 import requests
@@ -3645,6 +3645,75 @@ class ProgramInfoDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to schedule recording: {e}")
 
 
+class EPGDataFetcher(QThread):
+    """Fetches channels + paginated EPG events off the GUI thread, so a
+    slow/loaded Tvheadend server doesn't freeze the whole app (Windows
+    was popping up its "not responding, force quit?" dialog during the
+    old blocking, synchronous multi-request fetch)."""
+    dataReady = pyqtSignal(list, dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, server, parent=None):
+        super().__init__(parent)
+        self.server = server
+
+    def run(self):
+        try:
+            auth = None
+            if self.server.get('username') or self.server.get('password'):
+                auth = (self.server.get('username', ''), self.server.get('password', ''))
+            base_url = self.server['url']
+            if not base_url.startswith(('http://', 'https://')):
+                base_url = f"http://{base_url}"
+
+            # All channels
+            ch_resp = requests.get(f'{base_url}/api/channel/grid?limit=10000', auth=auth, timeout=10)
+            ch_entries = ch_resp.json().get('entries', [])
+            channels = sorted(
+                ch_entries,
+                key=lambda c: (c.get('number') or float('inf'), (c.get('name') or '').lower())
+            )
+
+            # EPG events for ALL channels, paginated - a single "limit"
+            # was getting exhausted well before the full time window when
+            # there are many channels (a single 5000-event page might
+            # only cover ~24h of combined listings).
+            events = []
+            offset = 0
+            batch_size = 5000
+            while True:
+                if self.isInterruptionRequested():
+                    return
+                epg_resp = requests.get(
+                    f'{base_url}/api/epg/events/grid',
+                    params={'start': offset, 'limit': batch_size},
+                    auth=auth, timeout=15
+                )
+                batch = epg_resp.json().get('entries', [])
+                events.extend(batch)
+                if len(batch) < batch_size:
+                    break
+                offset += batch_size
+                if offset >= 50000:  # generous safety cap against runaway loops
+                    break
+
+            if self.isInterruptionRequested():
+                return
+
+            events_by_channel = {}
+            for ev in events:
+                uuid = ev.get('channelUuid')
+                if not uuid:
+                    continue
+                events_by_channel.setdefault(uuid, []).append(ev)
+            for uuid in events_by_channel:
+                events_by_channel[uuid].sort(key=lambda e: e.get('start', 0))
+
+            self.dataReady.emit(channels, events_by_channel)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class EPGGridDialog(QDialog):
     """Program guide: all channels as rows against one
     shared, scrollable timeline (instead of one dialog per channel)."""
@@ -3781,71 +3850,43 @@ class EPGGridDialog(QDialog):
 
     def load_data(self):
         self.info_label.setText("Loading program guide...")
-        QApplication.processEvents()
-        try:
-            auth = None
-            if self.server.get('username') or self.server.get('password'):
-                auth = (self.server.get('username', ''), self.server.get('password', ''))
-            base_url = self.server['url']
-            if not base_url.startswith(('http://', 'https://')):
-                base_url = f"http://{base_url}"
+        self.refresh_btn.setEnabled(False)
+        self._fetcher = EPGDataFetcher(self.server, self)
+        self._fetcher.dataReady.connect(self._on_data_ready)
+        self._fetcher.error.connect(self._on_data_error)
+        self._fetcher.finished.connect(self._fetcher.deleteLater)
+        self._fetcher.start()
 
-            # All channels
-            ch_resp = requests.get(f'{base_url}/api/channel/grid?limit=10000', auth=auth, timeout=10)
-            ch_entries = ch_resp.json().get('entries', [])
-            self.channels = sorted(
-                ch_entries,
-                key=lambda c: (c.get('number') or float('inf'), (c.get('name') or '').lower())
-            )
+    def _on_data_ready(self, channels, events_by_channel):
+        self.refresh_btn.setEnabled(True)
+        self.channels = channels
+        self.events_by_channel = events_by_channel
 
-            # EPG events for ALL channels in a single request (this is the
-            # part that replaces the old per-channel "Show EPG" popup).
-            # Paginated because a single "limit" was getting exhausted
-            # well before the full time window when there are many
-            # channels - a single 5000-event page might only cover ~24h
-            # of combined listings, silently truncating everything after
-            # that even though the server has more.
-            events = []
-            offset = 0
-            batch_size = 5000
-            while True:
-                epg_resp = requests.get(
-                    f'{base_url}/api/epg/events/grid',
-                    params={'start': offset, 'limit': batch_size},
-                    auth=auth, timeout=15
-                )
-                batch = epg_resp.json().get('entries', [])
-                events.extend(batch)
-                if len(batch) < batch_size:
-                    break
-                offset += batch_size
-                if offset >= 50000:  # generous safety cap against runaway loops
-                    break
+        self.channel_column.channels = self.channels
+        self.channel_column.setMinimumHeight(max(1, len(self.channels)) * EPG_ROW_HEIGHT)
+        self.canvas.channels = self.channels
+        self.canvas.events_by_channel = events_by_channel
+        self.canvas.setMinimumSize(
+            int(self.total_minutes * EPG_PX_PER_MIN), max(1, len(self.channels)) * EPG_ROW_HEIGHT
+        )
+        self.channel_column.update()
+        self.canvas.update()
+        self.refresh_newspaper_table()
+        total_programs = sum(len(v) for v in events_by_channel.values())
+        self.info_label.setText(f"{len(self.channels)} channels \u2022 {total_programs} programs")
+        self.jump_to_now()
 
-            events_by_channel = {}
-            for ev in events:
-                uuid = ev.get('channelUuid')
-                if not uuid:
-                    continue
-                events_by_channel.setdefault(uuid, []).append(ev)
-            for uuid in events_by_channel:
-                events_by_channel[uuid].sort(key=lambda e: e.get('start', 0))
-            self.events_by_channel = events_by_channel
+    def _on_data_error(self, message):
+        self.refresh_btn.setEnabled(True)
+        self.info_label.setText(f"Error loading guide: {message}")
 
-            self.channel_column.channels = self.channels
-            self.channel_column.setMinimumHeight(max(1, len(self.channels)) * EPG_ROW_HEIGHT)
-            self.canvas.channels = self.channels
-            self.canvas.events_by_channel = events_by_channel
-            self.canvas.setMinimumSize(
-                int(self.total_minutes * EPG_PX_PER_MIN), max(1, len(self.channels)) * EPG_ROW_HEIGHT
-            )
-            self.channel_column.update()
-            self.canvas.update()
-            self.refresh_newspaper_table()
-            self.info_label.setText(f"{len(self.channels)} channels \u2022 {len(events)} programs")
-            self.jump_to_now()
-        except Exception as e:
-            self.info_label.setText(f"Error loading guide: {e}")
+    def closeEvent(self, event):
+        """Don't let the fetch thread outlive its dialog"""
+        fetcher = getattr(self, '_fetcher', None)
+        if fetcher is not None and fetcher.isRunning():
+            fetcher.requestInterruption()
+            fetcher.wait(2000)
+        super().closeEvent(event)
 
     def refresh_newspaper_table(self):
         """Fill the newspaper-style grid: channels as columns, half-hour
