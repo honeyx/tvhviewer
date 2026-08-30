@@ -3438,12 +3438,16 @@ class EPGChannelColumn(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(self.theme['panel_bg']))
+        expose = event.rect()
+        painter.fillRect(expose, QColor(self.theme['panel_bg']))
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
         metrics = QFontMetrics(font)
-        for i, ch in enumerate(self.channels):
+        first_row = max(0, expose.top() // EPG_ROW_HEIGHT)
+        last_row = min(len(self.channels) - 1, expose.bottom() // EPG_ROW_HEIGHT)
+        for i in range(first_row, last_row + 1):
+            ch = self.channels[i]
             y = i * EPG_ROW_HEIGHT
             bg = QColor(self.theme['alt_row']) if i % 2 else QColor(self.theme['panel_bg'])
             painter.fillRect(0, y, self.width(), EPG_ROW_HEIGHT, bg)
@@ -3485,8 +3489,9 @@ class EPGGridCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(self.theme['panel_bg']))
-        self._blocks = []
+        expose = event.rect()
+        painter.fillRect(expose, QColor(self.theme['panel_bg']))
+        self._blocks = [b for b in self._blocks if not expose.intersects(b[0].toRect())]
 
         now = datetime.now()
         window_end = self.window_start + timedelta(minutes=self.total_minutes)
@@ -3496,12 +3501,21 @@ class EPGGridCanvas(QWidget):
         painter.setFont(font)
         metrics = QFontMetrics(font)
 
-        for row, channel in enumerate(self.channels):
+        # Only touch the rows and time range Qt actually asked us to
+        # redraw (expose), instead of iterating every channel/program in
+        # the whole 48h window on every single scroll tick - that's what
+        # was making this view sluggish compared to the table-based
+        # newspaper view, which already only renders visible cells.
+        first_row = max(0, expose.top() // EPG_ROW_HEIGHT)
+        last_row = min(len(self.channels) - 1, expose.bottom() // EPG_ROW_HEIGHT)
+
+        for row in range(first_row, last_row + 1):
+            channel = self.channels[row]
             y = row * EPG_ROW_HEIGHT
             bg = QColor(self.theme['alt_row']) if row % 2 else QColor(self.theme['panel_bg'])
-            painter.fillRect(0, y, self.width(), EPG_ROW_HEIGHT, bg)
+            painter.fillRect(expose.left(), y, expose.width(), EPG_ROW_HEIGHT, bg)
             painter.setPen(QPen(QColor(self.theme['border'])))
-            painter.drawLine(0, y + EPG_ROW_HEIGHT, self.width(), y + EPG_ROW_HEIGHT)
+            painter.drawLine(expose.left(), y + EPG_ROW_HEIGHT, expose.right(), y + EPG_ROW_HEIGHT)
 
             events = self.events_by_channel.get(channel.get('uuid'), [])
             for ev in events:
@@ -3516,6 +3530,8 @@ class EPGGridCanvas(QWidget):
                 clip_stop = min(ev_stop, window_end)
                 x1 = (clip_start - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
                 x2 = (clip_stop - self.window_start).total_seconds() / 60 * EPG_PX_PER_MIN
+                if x2 < expose.left() or x1 > expose.right():
+                    continue  # entirely outside the exposed area - skip drawing it
                 width = max(2, x2 - x1)
                 rect = QRectF(x1, y + 2, width, EPG_ROW_HEIGHT - 4)
 
