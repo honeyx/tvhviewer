@@ -3476,6 +3476,17 @@ class EPGGridCanvas(QWidget):
         self.theme = theme
         self.setMinimumSize(int(total_minutes * EPG_PX_PER_MIN), max(1, len(channels)) * EPG_ROW_HEIGHT)
         self._blocks = []  # (QRectF, event, channel) for hit-testing clicks
+        # The currently visible viewport in canvas-local coordinates, kept
+        # up to date by EPGGridDialog on every scroll. NOT the same as a
+        # paintEvent's event.rect(): during scrolling, Qt often only
+        # repaints a thin newly-revealed strip (it blits the rest), so
+        # using event.rect() for "sticky" title positioning made titles
+        # flicker/disappear/truncate depending on which sliver happened
+        # to be exposed. This tracks the real, full visible area instead.
+        self._visible_rect = QRect()
+
+    def set_visible_rect(self, rect):
+        self._visible_rect = rect
 
     def set_theme(self, theme):
         self.theme = theme
@@ -3548,8 +3559,9 @@ class EPGGridCanvas(QWidget):
                 # right now (event.rect() is the currently-exposed area
                 # in the same widget-local coordinates), instead of the
                 # program's true (possibly off-screen) start position.
-                visible_left = max(rect.left(), event.rect().left())
-                visible_right = min(rect.right(), event.rect().right())
+                sticky = self._visible_rect if not self._visible_rect.isEmpty() else expose
+                visible_left = max(rect.left(), sticky.left())
+                visible_right = min(rect.right(), sticky.right())
                 text_rect = QRectF(visible_left + 6, rect.top(), max(0, visible_right - visible_left - 12), rect.height())
                 painter.setPen(QColor(self.theme['text']))
                 elided = metrics.elidedText(title, Qt.ElideRight, max(0, int(text_rect.width())))
@@ -3834,6 +3846,8 @@ class EPGGridDialog(QDialog):
             self.ruler_scroll.horizontalScrollBar().setValue)
         self.grid_scroll.verticalScrollBar().valueChanged.connect(
             self.channel_scroll.verticalScrollBar().setValue)
+        self.grid_scroll.horizontalScrollBar().valueChanged.connect(self._update_canvas_visible_rect)
+        self.grid_scroll.verticalScrollBar().valueChanged.connect(self._update_canvas_visible_rect)
 
         self.stack.addWidget(timeline_page)
 
@@ -3851,6 +3865,22 @@ class EPGGridDialog(QDialog):
         self.newspaper_table.cellClicked.connect(self._on_newspaper_cell_clicked)
         self._newspaper_cell_events = {}
         self.stack.addWidget(self.newspaper_table)
+
+    def _update_canvas_visible_rect(self):
+        """Track the real, full visible viewport (in canvas-local
+        coordinates) so paintEvent can keep program titles readable even
+        when Qt only repaints a thin scrolled-in strip rather than the
+        whole viewport."""
+        if not hasattr(self, 'grid_scroll'):
+            return
+        h = self.grid_scroll.horizontalScrollBar().value()
+        v = self.grid_scroll.verticalScrollBar().value()
+        size = self.grid_scroll.viewport().size()
+        self.canvas.set_visible_rect(QRect(h, v, size.width(), size.height()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_canvas_visible_rect()
 
     def set_view_mode(self, mode):
         self.timeline_view_btn.setChecked(mode == 'timeline')
@@ -3891,6 +3921,7 @@ class EPGGridDialog(QDialog):
         total_programs = sum(len(v) for v in events_by_channel.values())
         self.info_label.setText(f"{len(self.channels)} channels \u2022 {total_programs} programs")
         self.jump_to_now()
+        self._update_canvas_visible_rect()
 
     def _on_data_error(self, message):
         self.refresh_btn.setEnabled(True)
