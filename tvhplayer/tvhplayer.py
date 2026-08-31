@@ -1158,6 +1158,12 @@ class TVHeadendClient(QMainWindow):
         # channel table - recording buttons fall back to this.
         self.current_channel_data = None
 
+        # EPG cache: fetched once in the background and reused across
+        # EPG-guide openings, so re-opening it is instant instead of
+        # re-fetching (and re-waiting) every single time.
+        self.epg_cache = {'channels': [], 'events_by_channel': {}}
+        self.epg_fetcher = None
+
         
         # Add recording indicator variables
         self.recording_indicator_timer = None
@@ -1814,6 +1820,7 @@ class TVHeadendClient(QMainWindow):
             self.channels = [c['data'] for c in channel_data]
             self.rebuild_channels_menu()
             resumed = self.maybe_auto_resume_last_channel()
+            self.refresh_epg_cache()
             
             # Now add sorted channels to the table
             for idx, channel in enumerate(channel_data):
@@ -3193,6 +3200,31 @@ class TVHeadendClient(QMainWindow):
         except Exception:
             self.signal_label.setText("")
 
+    def refresh_epg_cache(self):
+        """(Re)fetch the all-channel EPG data in the background and cache
+        it, so opening the guide window can show it instantly next time
+        instead of waiting on a fresh fetch."""
+        if self.epg_fetcher is not None and self.epg_fetcher.isRunning():
+            return  # a refresh is already in flight
+        if not self.servers:
+            return
+        server = self.servers[self.server_combo.currentIndex()]
+        self.epg_fetcher = EPGDataFetcher(server, self)
+        self.epg_fetcher.dataReady.connect(self._on_epg_cache_ready)
+        self.epg_fetcher.finished.connect(self.epg_fetcher.deleteLater)
+        self.epg_fetcher.start()
+
+    def _on_epg_cache_ready(self, channels, events_by_channel):
+        self.epg_cache = {'channels': channels, 'events_by_channel': events_by_channel}
+        # If the guide window is currently open, push the fresh data
+        # straight into it too instead of leaving it showing stale data
+        # until the next manual refresh.
+        if self._epg_grid_dialog is not None:
+            try:
+                self._epg_grid_dialog._on_data_ready(channels, events_by_channel)
+            except RuntimeError:
+                pass
+
     def show_epg_grid(self):
         """Open the program guide: all channels + a scrollable timeline"""
         if not self.servers:
@@ -3212,7 +3244,17 @@ class TVHeadendClient(QMainWindow):
         self._epg_grid_dialog = dialog
         dialog.finished.connect(lambda _: setattr(self, '_epg_grid_dialog', None))
         dialog.show()
-        dialog.load_data()
+
+        if self.epg_cache['channels']:
+            # Instant display from cache, then refresh quietly in the
+            # background so it stays reasonably up to date.
+            dialog._on_data_ready(self.epg_cache['channels'], self.epg_cache['events_by_channel'])
+            self.refresh_epg_cache()
+        else:
+            # Nothing cached yet (e.g. very first EPG open right after
+            # startup, before the background prefetch has finished) -
+            # fall back to a normal fetch for this dialog directly.
+            dialog.load_data()
 
     def play_channel_from_table(self, item):
         """Play channel from table selection"""
@@ -3644,6 +3686,14 @@ class ProgramInfoDialog(QDialog):
         if self.main_window is not None:
             self.main_window.play_channel_by_data(self.channel)
         self.accept()
+        # Also close the EPG guide window itself - having picked a
+        # program to watch, the guide's own job here is done.
+        epg_dialog = self.parent()
+        if epg_dialog is not None:
+            try:
+                epg_dialog.close()
+            except RuntimeError:
+                pass
 
     def schedule_recording(self):
         try:
@@ -3906,13 +3956,13 @@ class EPGGridDialog(QDialog):
         self.refresh_newspaper_table()
 
     def load_data(self):
+        """Delegates to the main window's shared EPG cache/fetcher instead
+        of running its own - this dialog no longer owns any background
+        thread at all, which also means closing it is instant."""
         self.info_label.setText("Loading program guide...")
         self.refresh_btn.setEnabled(False)
-        self._fetcher = EPGDataFetcher(self.server, self)
-        self._fetcher.dataReady.connect(self._on_data_ready)
-        self._fetcher.error.connect(self._on_data_error)
-        self._fetcher.finished.connect(self._fetcher.deleteLater)
-        self._fetcher.start()
+        if self.main_window is not None:
+            self.main_window.refresh_epg_cache()
 
     def _on_data_ready(self, channels, events_by_channel):
         self.refresh_btn.setEnabled(True)
@@ -3937,14 +3987,6 @@ class EPGGridDialog(QDialog):
     def _on_data_error(self, message):
         self.refresh_btn.setEnabled(True)
         self.info_label.setText(f"Error loading guide: {message}")
-
-    def closeEvent(self, event):
-        """Don't let the fetch thread outlive its dialog"""
-        fetcher = getattr(self, '_fetcher', None)
-        if fetcher is not None and fetcher.isRunning():
-            fetcher.requestInterruption()
-            fetcher.wait(2000)
-        super().closeEvent(event)
 
     def refresh_newspaper_table(self):
         """Fill the newspaper-style grid: channels as columns, half-hour
