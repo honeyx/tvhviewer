@@ -3876,7 +3876,18 @@ class EPGGridDialog(QDialog):
         h = self.grid_scroll.horizontalScrollBar().value()
         v = self.grid_scroll.verticalScrollBar().value()
         size = self.grid_scroll.viewport().size()
-        self.canvas.set_visible_rect(QRect(h, v, size.width(), size.height()))
+        rect = QRect(h, v, size.width(), size.height())
+        self.canvas.set_visible_rect(rect)
+        # Force a real repaint of the whole *visible* area on every scroll
+        # tick. Qt's default optimization here is to blit already-painted
+        # pixels to their new scrolled position and only repaint the
+        # thin newly-revealed edge - which is wrong for us, since our
+        # "sticky" title text needs to slide within a block on every
+        # scroll step, not just when a block's edge is freshly exposed.
+        # (Passing the rect keeps this limited to the visible viewport,
+        # not the whole multi-day-wide canvas - the earlier culling
+        # optimization is unaffected.)
+        self.canvas.update(rect)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
