@@ -63,26 +63,6 @@ jobs:
             tvhplayer/tvhplayer.py
         shell: pwsh
 
-      - name: Copy Qt runtime DLLs next to the exe (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          # qwindows.dll (the Qt platform plugin) was being *found* but
-          # failing to *load* - almost always because DLLs it depends on
-          # (Qt5Core/Qt5Gui/the ANGLE OpenGL translation libs) end up
-          # nested under a different folder than --collect-all placed it
-          # in, so Windows' DLL search never finds them. Copying every
-          # PyQt5 Qt5 runtime DLL directly next to the .exe (the first
-          # place Windows always looks) sidesteps that entirely.
-          $pyqt5_bin = python -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'bin'))"
-          Copy-Item "$pyqt5_bin\*.dll" -Destination "dist/${{ matrix.artifact_name }}/" -Force
-          $platforms_src = "dist/${{ matrix.artifact_name }}/_internal/PyQt5/Qt5/plugins/platforms"
-          $platforms_dst = "dist/${{ matrix.artifact_name }}/platforms"
-          if (Test-Path $platforms_src) {
-            New-Item -ItemType Directory -Force -Path $platforms_dst | Out-Null
-            Copy-Item "$platforms_src\*" -Destination $platforms_dst -Force
-          }
-        shell: pwsh
-
       - name: Bundle ffmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
