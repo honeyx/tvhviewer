@@ -2,8 +2,8 @@
 
 A modern desktop client for **[TVHeadend](https://tvheadend.org/)**. Easily watch, browse, and record live TV and radio directly on your PC.
 
-**TVHviewer is an independent and modernized evolution of the orginal TVHplayer [TVHplayer](https://github.com/mfat/tvhplayer) by mFat. It has been detached to provide ongoing updates, enhanced cross-platform support, and a completely refreshed user experience. (See NOTICE.md for full credits and a detailed changelog).**
-See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in this fork.
+TVHviewer is an independent and modernized evolution of the orginal TVHplayer [TVHplayer](https://github.com/mfat/tvhplayer) by mFat. It has been detached to provide ongoing updates, enhanced cross-platform support, and a completely refreshed user experience. (See NOTICE.md for full credits and a detailed changelog).
+
 
 ![Screenshot](Screenshots/Screenshot_7.png)
 
