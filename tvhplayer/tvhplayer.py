@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
     QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics
 import json
 import requests
@@ -1163,6 +1163,7 @@ class TVHeadendClient(QMainWindow):
         # re-fetching (and re-waiting) every single time.
         self.epg_cache = {'channels': [], 'events_by_channel': {}}
         self.epg_fetcher = None
+        self.epg_thread = None
 
         
         # Add recording indicator variables
@@ -3204,15 +3205,20 @@ class TVHeadendClient(QMainWindow):
         """(Re)fetch the all-channel EPG data in the background and cache
         it, so opening the guide window can show it instantly next time
         instead of waiting on a fresh fetch."""
-        if self.epg_fetcher is not None and self.epg_fetcher.isRunning():
+        if self.epg_thread is not None and self.epg_thread.isRunning():
             return  # a refresh is already in flight
         if not self.servers:
             return
         server = self.servers[self.server_combo.currentIndex()]
-        self.epg_fetcher = EPGDataFetcher(server, self)
+
+        self.epg_thread = QThread()
+        self.epg_fetcher = EPGDataFetcher(server)
+        self.epg_fetcher.moveToThread(self.epg_thread)
+        self.epg_thread.started.connect(self.epg_fetcher.run)
         self.epg_fetcher.dataReady.connect(self._on_epg_cache_ready)
-        self.epg_fetcher.finished.connect(self.epg_fetcher.deleteLater)
-        self.epg_fetcher.start()
+        self.epg_fetcher.finished.connect(self.epg_thread.quit)
+        self.epg_thread.finished.connect(self.epg_fetcher.deleteLater)
+        self.epg_thread.start()
 
     def _on_epg_cache_ready(self, channels, events_by_channel):
         self.epg_cache = {'channels': channels, 'events_by_channel': events_by_channel}
@@ -3247,14 +3253,27 @@ class TVHeadendClient(QMainWindow):
 
         if self.epg_cache['channels']:
             # Instant display from cache, then refresh quietly in the
-            # background so it stays reasonably up to date.
-            dialog._on_data_ready(self.epg_cache['channels'], self.epg_cache['events_by_channel'])
+            # background so it stays reasonably up to date. Populating via
+            # a zero-delay timer (rather than synchronously, right here)
+            # lets Qt finish showing/laying out the new window first -
+            # doing heavy widget population immediately after show() was
+            # implicated in a hard Windows-only crash inside Qt5Core.dll.
+            cached_channels = self.epg_cache['channels']
+            cached_events = self.epg_cache['events_by_channel']
+
+            def _populate_from_cache():
+                try:
+                    dialog._on_data_ready(cached_channels, cached_events)
+                except RuntimeError:
+                    pass  # dialog was closed again before this ran
+
+            QTimer.singleShot(0, _populate_from_cache)
             self.refresh_epg_cache()
         else:
             # Nothing cached yet (e.g. very first EPG open right after
             # startup, before the background prefetch has finished) -
             # fall back to a normal fetch for this dialog directly.
-            dialog.load_data()
+            QTimer.singleShot(0, dialog.load_data)
 
     def play_channel_from_table(self, item):
         """Play channel from table selection"""
@@ -3723,17 +3742,27 @@ class ProgramInfoDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to schedule recording: {e}")
 
 
-class EPGDataFetcher(QThread):
+class EPGDataFetcher(QObject):
     """Fetches channels + paginated EPG events off the GUI thread, so a
     slow/loaded Tvheadend server doesn't freeze the whole app (Windows
     was popping up its "not responding, force quit?" dialog during the
-    old blocking, synchronous multi-request fetch)."""
+    old blocking, synchronous multi-request fetch).
+
+    Uses the worker-object + moveToThread pattern rather than
+    subclassing QThread directly - a QThread subclass instantiated with
+    a QObject parent was reliably crashing inside Qt5Core.dll on Windows
+    (0xc0000409, same faulting offset every time), which this avoids."""
     dataReady = pyqtSignal(list, dict)
     error = pyqtSignal(str)
+    finished = pyqtSignal()
 
-    def __init__(self, server, parent=None):
-        super().__init__(parent)
+    def __init__(self, server):
+        super().__init__()
         self.server = server
+        self._interrupted = False
+
+    def request_interruption(self):
+        self._interrupted = True
 
     def run(self):
         try:
@@ -3760,7 +3789,7 @@ class EPGDataFetcher(QThread):
             offset = 0
             batch_size = 5000
             while True:
-                if self.isInterruptionRequested():
+                if self._interrupted:
                     return
                 epg_resp = requests.get(
                     f'{base_url}/api/epg/events/grid',
@@ -3775,7 +3804,7 @@ class EPGDataFetcher(QThread):
                 if offset >= 50000:  # generous safety cap against runaway loops
                     break
 
-            if self.isInterruptionRequested():
+            if self._interrupted:
                 return
 
             events_by_channel = {}
@@ -3790,6 +3819,8 @@ class EPGDataFetcher(QThread):
             self.dataReady.emit(channels, events_by_channel)
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            self.finished.emit()
 
 
 class EPGGridDialog(QDialog):
