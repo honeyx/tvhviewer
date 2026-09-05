@@ -4,6 +4,7 @@ A modern desktop client for **[TVHeadend](https://tvheadend.org/)**. Easily watc
 
 TVHviewer is an independent and modernized evolution of the orginal [TVHplayer](https://github.com/mfat/tvhplayer) by mFat. It has been detached to provide ongoing updates, enhanced cross-platform support, and a completely refreshed user experience. (See NOTICE.md for full credits and a detailed changelog).
 
+[![License: GPL v3](https://shields.io)](https://gnu.org)
 
 ![Screenshot](Screenshots/Screenshot_7.png)
 
