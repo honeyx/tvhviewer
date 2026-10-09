@@ -45,7 +45,7 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyqt5 python-vlc requests urllib3 pillow pyinstaller
+          pip install pyqt5 python-vlc requests urllib3 pillow psutil pyinstaller
         shell: bash
 
       # --- Windows: build as a folder (--onedir), not a single --onefile
@@ -193,7 +193,7 @@ jobs:
                   f"Section: video\n"
                   f"Priority: optional\n"
                   f"Architecture: all\n"
-                  f"Depends: python3 (>= 3.8), python3-pyqt5, python3-vlc, vlc, python3-requests, python3-urllib3, python3-pil\n"
+                  f"Depends: python3 (>= 3.8), python3-pyqt5, python3-vlc, vlc, python3-requests, python3-urllib3, python3-pil, python3-psutil\n"
                   f"Maintainer: honeyx <noreply@example.com>\n"
                   f"Description: More modern desktop client for Tvheadend\n"
                   f" Watch and record live TV. TVHviewer is a fork of TVHplayer,\n"
