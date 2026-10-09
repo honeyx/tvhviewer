@@ -32,6 +32,8 @@ import requests
 import time
 import subprocess
 import threading
+import shlex
+import shutil
 import os
 import traceback
 from pathlib import Path
@@ -1165,6 +1167,16 @@ class TVHeadendClient(QMainWindow):
         self.epg_fetcher = None
         self.epg_thread = None
 
+        # Kodi hand-off state (see launch_kodi)
+        self.kodi_active = False
+        self._kodi_proc = None
+        self._kodi_timer = None
+        self._kodi_started_at = 0
+        self._kodi_watch_by_name = False
+        self._kodi_seen_named = False
+        self._kodi_child_exit_at = 0
+        self._kodi_resume_channel = None
+
         
         # Add recording indicator variables
         self.recording_indicator_timer = None
@@ -1459,8 +1471,16 @@ class TVHeadendClient(QMainWindow):
         self.auto_resume_action.setChecked(self.config.get('auto_resume_last_channel', False))
         self.auto_resume_action.triggered.connect(self.toggle_auto_resume)
         settings_menu.addAction(self.auto_resume_action)
+
+        kodi_path_action = QAction("Kodi Path...", self)
+        kodi_path_action.triggered.connect(self.set_kodi_path)
+        settings_menu.addAction(kodi_path_action)
         
         # Create actions
+        self.kodi_menu_action = QAction("Launch Kodi", self)
+        self.kodi_menu_action.triggered.connect(self.launch_kodi)
+        file_menu.addAction(self.kodi_menu_action)
+        file_menu.addSeparator()
         exit_action = QAction("Exit", self)
         if sys.platform == "darwin":  # macOS
             exit_action.setShortcut("Cmd+Q")
@@ -1537,6 +1557,13 @@ class TVHeadendClient(QMainWindow):
         self.tb_fullscreen_action.setToolTip("Toggle fullscreen")
         self.tb_fullscreen_action.triggered.connect(self.toggle_fullscreen)
         toolbar.addAction(self.tb_fullscreen_action)
+
+        toolbar.addSeparator()
+
+        self.kodi_btn = QAction(QIcon(self.get_icon('mediacenter.svg')), "Kodi", self)
+        self.kodi_btn.setToolTip("Launch Kodi (live TV pauses until Kodi is closed)")
+        self.kodi_btn.triggered.connect(self.launch_kodi)
+        toolbar.addAction(self.kodi_btn)
 
         # Spacer pushes the theme toggle to the far right
         tb_spacer = QWidget()
@@ -1930,6 +1957,192 @@ class TVHeadendClient(QMainWindow):
                 self.play_channel_by_data(channel_data)
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Kodi hand-off: launch Kodi, pause live TV while it runs, resume after
+    # ------------------------------------------------------------------
+    def default_kodi_path(self):
+        """Best-guess Kodi location for this platform ('' if not found)"""
+        if sys.platform == 'win32':
+            for env_name in ('ProgramFiles', 'ProgramFiles(x86)'):
+                base = os.environ.get(env_name)
+                if base:
+                    candidate = os.path.join(base, 'Kodi', 'Kodi.exe')
+                    if os.path.isfile(candidate):
+                        return candidate
+        elif sys.platform == 'darwin':
+            if os.path.isdir('/Applications/Kodi.app'):
+                return '/Applications/Kodi.app'
+        else:
+            found = shutil.which('kodi')
+            if found:
+                return found
+        return ''
+
+    def build_kodi_command(self, path):
+        """Turn the configured path/command into an argv list. An existing
+        file/.app is used as-is (so paths with spaces just work); anything
+        else is split like a command line (e.g. 'flatpak run tv.kodi.Kodi')."""
+        path = path.strip()
+        if not path:
+            return []
+        if os.path.exists(path):
+            cmd = [path]
+        else:
+            cmd = shlex.split(path, posix=(sys.platform != 'win32'))
+        if cmd and sys.platform == 'darwin' and cmd[0].endswith('.app'):
+            # -W: 'open' stays alive until the app quits, so we can watch it
+            cmd = ['open', '-W', '-a', cmd[0]] + cmd[1:]
+        return cmd
+
+    def set_kodi_path(self):
+        """Small dialog to store the path (or command) used to start Kodi"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Kodi Path")
+        dialog.resize(540, 140)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Path (or command) used to launch Kodi:"))
+        row = QHBoxLayout()
+        edit = QLineEdit(self.config.get('kodi_path', ''))
+        edit.setPlaceholderText(self.default_kodi_path() or "e.g. C:\\Program Files\\Kodi\\Kodi.exe")
+        browse = QPushButton("Browse...")
+
+        def _browse():
+            start = os.path.dirname(edit.text().strip()) if edit.text().strip() else str(Path.home())
+            chosen, _ = QFileDialog.getOpenFileName(
+                dialog, "Select Kodi", start, "All Files (*)",
+                options=QFileDialog.DontUseNativeDialog)
+            if chosen:
+                edit.setText(chosen)
+        browse.clicked.connect(_browse)
+        row.addWidget(edit)
+        row.addWidget(browse)
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            self.config['kodi_path'] = edit.text().strip()
+            self.save_config()
+            return True
+        return False
+
+    def launch_kodi(self):
+        if self.kodi_active:
+            self.statusbar.showMessage("Kodi is already running")
+            return
+
+        # Find a usable command, asking for the path if needed
+        path = self.config.get('kodi_path', '').strip() or self.default_kodi_path()
+        while True:
+            try:
+                cmd = self.build_kodi_command(path)
+            except ValueError:
+                cmd = []
+            if cmd and (shutil.which(cmd[0]) or os.path.exists(cmd[0])):
+                break
+            if path:
+                QMessageBox.warning(self, "Kodi not found",
+                                    f"Couldn't find Kodi at:\n{path}\n\nPlease set the correct path.")
+            else:
+                QMessageBox.information(self, "Kodi path needed",
+                                        "Please tell TVHviewer where Kodi is installed.")
+            if not self.set_kodi_path():
+                return
+            path = self.config.get('kodi_path', '').strip() or self.default_kodi_path()
+
+        # Leave fullscreen first - otherwise Kodi can end up behind us
+        if self.is_fullscreen:
+            self._last_fullscreen_toggle = 0  # bypass the double-toggle guard
+            self.toggle_fullscreen()
+
+        try:
+            popen_kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+            if sys.platform != 'win32':
+                popen_kwargs['start_new_session'] = True  # Kodi survives us closing
+            self._kodi_proc = subprocess.Popen(cmd, **popen_kwargs)
+        except Exception as e:
+            self.statusbar.showMessage(f"Couldn't start Kodi: {e}")
+            QMessageBox.warning(self, "Kodi", f"Couldn't start Kodi:\n{e}")
+            return
+
+        # Kodi is up: remember what was playing, then free video + audio
+        was_playing = bool(self.media_player.is_playing())
+        self._kodi_resume_channel = self.current_channel_data if was_playing else None
+        self.kodi_active = True
+        self.media_player.stop()
+        self.kodi_btn.setEnabled(False)
+        self.kodi_menu_action.setEnabled(False)
+        self.statusbar.showMessage("Kodi running - live TV paused")
+
+        self._kodi_started_at = time.time()
+        self._kodi_watch_by_name = False
+        self._kodi_seen_named = False
+        self._kodi_child_exit_at = 0
+        self._kodi_timer = QTimer(self)
+        self._kodi_timer.timeout.connect(self._check_kodi)
+        self._kodi_timer.start(1000)
+
+    def _kodi_named_running(self):
+        """True if any process named kodi* exists (needs psutil)"""
+        try:
+            import psutil
+        except ImportError:
+            return False
+        for proc in psutil.process_iter(['name']):
+            if (proc.info.get('name') or '').lower().startswith('kodi'):
+                return True
+        return False
+
+    def _have_psutil(self):
+        try:
+            import psutil  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def _check_kodi(self):
+        """Timer tick: has Kodi quit yet?"""
+        proc = self._kodi_proc
+        if proc is not None and proc.poll() is None:
+            return  # our child is still running
+        now = time.time()
+        if proc is not None and not self._kodi_watch_by_name:
+            # Child ended. On Linux, a clean exit within the first seconds
+            # usually means a launcher script that handed off to the real
+            # Kodi process - keep watching by process name in that case.
+            if (sys.platform.startswith('linux') and proc.poll() == 0
+                    and now - self._kodi_started_at < 20 and self._have_psutil()):
+                self._kodi_watch_by_name = True
+                self._kodi_child_exit_at = now
+            else:
+                self._kodi_finished()
+                return
+        if self._kodi_named_running():
+            self._kodi_seen_named = True
+            return
+        if not self._kodi_seen_named and now - self._kodi_child_exit_at < 8:
+            return  # the real process may still be starting
+        self._kodi_finished()
+
+    def _kodi_finished(self):
+        if self._kodi_timer is not None:
+            self._kodi_timer.stop()
+            self._kodi_timer = None
+        self._kodi_proc = None
+        self.kodi_active = False
+        self.kodi_btn.setEnabled(True)
+        self.kodi_menu_action.setEnabled(True)
+        self.raise_()
+        self.activateWindow()
+        channel = self._kodi_resume_channel
+        self._kodi_resume_channel = None
+        if channel:
+            self.play_channel_by_data(channel)
+        else:
+            self.statusbar.showMessage("Kodi closed")
 
     def toggle_auto_resume(self, checked):
         self.config['auto_resume_last_channel'] = checked
@@ -3284,6 +3497,9 @@ class TVHeadendClient(QMainWindow):
 
     def play_channel_by_data(self, channel_data):
         """Play channel using channel data"""
+        if self.kodi_active:
+            self.statusbar.showMessage("Kodi is running - live TV is paused until it is closed")
+            return
         try:
             self.current_channel_data = channel_data
             if channel_data and channel_data.get('name'):
