@@ -1,12 +1,11 @@
 # TVHviewer
 
-A modern desktop client for **[TVHeadend](https://tvheadend.org/)**. Easily watch, browse, and record live TV and radio directly on your PC.
+More modern desktop client for [TVHeadend](https://tvheadend.org/). Watch and record live TV on PC.
 
-TVHviewer is an independent and modernized evolution of the orginal [TVHplayer](https://github.com/mfat/tvhplayer) by mFat. It has been detached to provide ongoing updates, enhanced cross-platform support, and a completely refreshed user experience. (See NOTICE.md for full credits and a detailed changelog).
+**TVHviewer is a fork of [TVHplayer](https://github.com/mfat/tvhplayer) by mFat.**
+See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in this fork.
 
-[![License: GPL v3](https://shields.io)](https://gnu.org)
-
-![Screenshot](Screenshots/Screenshot_7.png)
+![Screenshot](Screenshots/Screenshot_6.png)
 
 ## Features
 
@@ -16,10 +15,14 @@ TVHviewer is an independent and modernized evolution of the orginal [TVHplayer](
 - Dark / Light color theme
 - Favorites menu, separate from the full channel browser
 - Local recording (saves to disk via VLC/ffmpeg) with remembered save location
+- Launch Kodi from the app (File menu / toolbar, path under Settings →
+  Kodi Path): live TV pauses while Kodi runs and resumes when it closes
+- Optional on-screen display (OSD) drawn from skins you provide yourself, with
+  Media Center style keys (see below)
 - Server status, tuner signal strength, and video/audio format shown
   in the status bar
-- Cross-platform (Linux, Windows) — this fork has mainly been
-  tested on Linux (Zorin OS / Ubuntu) and Windows 11
+- Cross-platform (Linux, macOS, Windows) — this fork has mainly been
+  tested on Linux (Zorin OS / Ubuntu)
 
 ## Install
 
@@ -29,12 +32,18 @@ Download the latest `.deb` from [Releases](../../releases) and install:
 sudo apt install ./tvhviewer_*.deb
 ```
 
-### Windows (built executable)
-Download the latest `tvhviewer-windows.exe` from
-[Releases](../../releases).
-**You still need [VLC](https://www.videolan.org/vlc/) installed separately** —
-the executable bundles the Python/Qt app but not the VLC engine itself
-(python-vlc only provides bindings to your system's VLC installation).
+### Windows (installer)
+Download the latest `tvhviewer-X.X.X-setup.exe` from [Releases](../../releases)
+and run it. ffmpeg (for local recording) is bundled — you only need
+**[VLC](https://www.videolan.org/vlc/) installed separately**, since
+python-vlc only provides bindings to your system's VLC installation,
+not VLC itself.
+
+### macOS (built executable)
+Download the latest macOS build from [Releases](../../releases).
+**You still need [VLC](https://www.videolan.org/vlc/) installed separately**,
+and **[ffmpeg](https://ffmpeg.org/download.html)** on your PATH for local
+recording (server-side recording via the EPG guide doesn't need it).
 
 ### From source
 ```bash
@@ -53,3 +62,18 @@ python3 tvhplayer.py
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE).
 This is the same license as the original TVHplayer project.
+
+## OSD skins (optional)
+
+TVHviewer can draw an on-screen display (volume bar, clock, channel/now-next
+info) from skins in the XML "OSDSkin 1.1" layout. **No skins are included.**
+Copy a skin folder you are entitled to use into the `OSDskins` folder
+(Settings → OSD Skin → *Open OSDskins Folder*; located in the TVHviewer config
+directory, e.g. `%APPDATA%\TVHplayer\OSDskins` on Windows) and pick it under
+Settings → OSD Skin. The default is *Off*.
+
+Default keys (Windows Media Center keyboard commands, so an MCE remote or a
+programmed Flirc works): `Ctrl+D` info, `F8` mute, `F9`/`F10` volume down/up,
+`PgUp`/`=` and `PgDown`/`-` channel up/down. Override them in the config file
+under `"keymap"` (e.g. `{"keymap": {"info": "I", "channel_up": ""}}`; an empty
+string disables an action).
