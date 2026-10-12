@@ -23,8 +23,17 @@ from PyQt5.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
     QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject
-from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject, QPoint, QUrl
+from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics, QDesktopServices
+
+# Optional OSD skin support (separate module; the app works without it)
+try:
+    from . import osdskin
+except ImportError:
+    try:
+        import osdskin
+    except ImportError:
+        osdskin = None
 import json
 import requests
 # Note: this app loads all icons via filesystem paths (see get_icon()),
@@ -1167,6 +1176,15 @@ class TVHeadendClient(QMainWindow):
         self.epg_fetcher = None
         self.epg_thread = None
 
+        # OSD (on-screen display) rendered from user-supplied skins that live
+        # in <config dir>/OSDskins - none are shipped with TVHviewer
+        self.osd_skins_dir = os.path.join(self.config_dir, 'OSDskins')
+        os.makedirs(self.osd_skins_dir, exist_ok=True)
+        self.osd_skin = None
+        self.osd_overlay = None
+        self._osd_ready = False  # stays False briefly at startup so the initial volume sync doesn't pop an OSD
+        self._shortcuts = []
+
         # Kodi hand-off state (see launch_kodi)
         self.kodi_active = False
         self._kodi_proc = None
@@ -1240,6 +1258,11 @@ class TVHeadendClient(QMainWindow):
 
         # Then setup UI
         self.setup_ui()
+
+        # OSD skin + Media Center style key bindings
+        self.load_osd_skin()
+        self.setup_osd_shortcuts()
+        QTimer.singleShot(2500, lambda: setattr(self, '_osd_ready', True))
         
         # Update to use config for last server
         self.server_combo.setCurrentIndex(self.config.get('last_server', 0))
@@ -1475,6 +1498,11 @@ class TVHeadendClient(QMainWindow):
         kodi_path_action = QAction("Kodi Path...", self)
         kodi_path_action.triggered.connect(self.set_kodi_path)
         settings_menu.addAction(kodi_path_action)
+
+        self.osd_menu = settings_menu.addMenu("OSD Skin")
+        self.osd_action_group = QActionGroup(self)
+        self.osd_action_group.setExclusive(True)
+        self.osd_menu.aboutToShow.connect(self.rebuild_osd_menu)
         
         # Create actions
         self.kodi_menu_action = QAction("Launch Kodi", self)
@@ -1957,6 +1985,213 @@ class TVHeadendClient(QMainWindow):
                 self.play_channel_by_data(channel_data)
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # OSD: skin-driven on-screen display + Media Center style key bindings
+    # ------------------------------------------------------------------
+    DEFAULT_KEYMAP = {
+        # Windows Media Center keyboard commands (what an MCE remote or a
+        # programmed Flirc sends). Several keys per action: comma separated.
+        # Override in the config file under "keymap"; "" disables an action.
+        'info': 'Ctrl+D',
+        'volume_down': 'F9',
+        'volume_up': 'F10',
+        'mute': 'F8',
+        'channel_up': 'PgUp, =',
+        'channel_down': 'PgDown, -',
+    }
+
+    def load_osd_skin(self):
+        self.osd_skin = None
+        if osdskin is None:
+            return
+        name = self.config.get('osd_skin', '')
+        folder = osdskin.find_skins(self.osd_skins_dir).get(name)
+        if folder:
+            try:
+                self.osd_skin = osdskin.OSDSkin(folder)
+            except Exception as e:
+                print(f"Debug: Couldn't load OSD skin {name}: {e}")
+
+    def rebuild_osd_menu(self):
+        """Settings -> OSD Skin: Off + every skin found in the OSDskins folder"""
+        self.osd_menu.clear()
+        for action in self.osd_action_group.actions():
+            self.osd_action_group.removeAction(action)
+        current = self.config.get('osd_skin', '')
+
+        off = QAction("Off", self)
+        off.setCheckable(True)
+        off.setChecked(not current)
+        off.triggered.connect(lambda: self.select_osd_skin(''))
+        self.osd_action_group.addAction(off)
+        self.osd_menu.addAction(off)
+
+        skins = osdskin.find_skins(self.osd_skins_dir) if osdskin is not None else {}
+        for name in skins:
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda checked, n=name: self.select_osd_skin(n))
+            self.osd_action_group.addAction(action)
+            self.osd_menu.addAction(action)
+        if not skins:
+            empty = QAction("(no skins found)", self)
+            empty.setEnabled(False)
+            self.osd_menu.addAction(empty)
+
+        self.osd_menu.addSeparator()
+        open_folder = QAction("Open OSDskins Folder", self)
+        open_folder.triggered.connect(self.open_osd_folder)
+        self.osd_menu.addAction(open_folder)
+
+    def select_osd_skin(self, name):
+        self.config['osd_skin'] = name
+        self.save_config()
+        self.load_osd_skin()
+        if self.osd_skin is not None:
+            self._osd_ready = True
+            self.show_osd('miniepg', 5000)  # preview
+        elif self.osd_overlay is not None:
+            self.osd_overlay.hide()
+
+    def open_osd_folder(self):
+        os.makedirs(self.osd_skins_dir, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.osd_skins_dir))
+
+    def osd_stream_info(self):
+        """Codec / resolution / audio format as the skin's image names"""
+        info = {}
+        try:
+            size = self.media_player.video_get_size(0)
+            if size and size[1]:
+                h = size[1]
+                info['tv.video.vres'] = ('2160' if h >= 2160 else '1080' if h >= 1000 else
+                                         '720' if h >= 700 else '576' if h >= 560 else '480')
+            media = self.media_player.get_media()
+            tracks = media.tracks_get() if media is not None and hasattr(media, 'tracks_get') else None
+            video_names = {'h264': 'H.264 Video', 'avc1': 'H.264 Video', 'hevc': 'HEVC Video',
+                           'hev1': 'HEVC Video', 'mpgv': 'MPEG2 Video', 'mp2v': 'MPEG2 Video',
+                           'wvc1': 'VC1 Video', 'vc1': 'VC1 Video'}
+            for track in tracks or []:
+                fourcc = track.codec.to_bytes(4, 'little').decode('ascii', errors='ignore').strip().lower()
+                if track.type == vlc.TrackType.video and 'tv.video.type' not in info:
+                    info['tv.video.type'] = video_names.get(fourcc, '')
+                elif track.type == vlc.TrackType.audio and 'tv.audio.pic' not in info:
+                    try:
+                        channels = track.u.audio.contents.channels
+                    except Exception:
+                        channels = 2
+                    if fourcc in ('a52', 'ac3', 'eac3'):
+                        info['tv.audio.pic'] = 'audio_dolby51.png' if channels >= 6 else 'audio_dolby.png'
+                    elif fourcc in ('mp4a', 'aac'):
+                        info['tv.audio.pic'] = 'audio_AAC.png'
+                    elif fourcc.startswith('dts'):
+                        info['tv.audio.pic'] = 'audio_DTS.png'
+                    else:
+                        info['tv.audio.pic'] = 'audio_mono.png' if channels == 1 else 'audio_stereo.png'
+        except Exception:
+            pass  # stream info is best-effort
+        return info
+
+    def osd_values(self):
+        """Everything a skin can ask for, keyed by lower-case placeholder name"""
+        muted = self.media_player.audio_get_mute() == 1
+        proc = getattr(self, 'ffmpeg_process', None)
+        values = {
+            '_now': datetime.now(),
+            'volume': '0' if muted else str(self.volume_slider.value()),
+            'recording': proc is not None and proc.poll() is None,
+        }
+        channel = self.current_channel_data or {}
+        values['channelname'] = channel.get('name', '')
+        values['channelnr'] = str(channel.get('number') or '')
+
+        # now / next straight from the cached EPG
+        events = self.epg_cache['events_by_channel'].get(channel.get('uuid'), [])
+        now_ts = time.time()
+        current = following = None
+        for i, ev in enumerate(events):
+            if ev.get('start', 0) <= now_ts < ev.get('stop', 0):
+                current = ev
+                following = events[i + 1] if i + 1 < len(events) else None
+                break
+            if ev.get('start', 0) > now_ts:
+                following = ev
+                break
+        if current:
+            total = current['stop'] - current['start']
+            values.update({
+                'tv.now.start': datetime.fromtimestamp(current['start']).strftime('%H:%M'),
+                'tv.now.title': _epg_text(current.get('title')),
+                'tv.now.remain': f"{max(0, int((current['stop'] - now_ts + 59) // 60))} min",  # round up
+                'tv.now.percentage': str(int(100 * (now_ts - current['start']) / total)) if total > 0 else '0',
+                'tv.now.description': _epg_text(current.get('description'), _epg_text(current.get('summary'))),
+            })
+        if following:
+            values['tv.next.start'] = datetime.fromtimestamp(following['start']).strftime('%H:%M')
+            values['tv.next.title'] = _epg_text(following.get('title'))
+        values.update(self.osd_stream_info())
+        return values
+
+    def show_osd(self, key, timeout_ms=4000):
+        """Show OSD layer `key` (volume / clock / miniepg) over the video"""
+        if self.osd_skin is None or osdskin is None or not self._osd_ready:
+            return
+        try:
+            if self.osd_overlay is None:
+                self.osd_overlay = osdskin.OSDOverlay(self)
+            area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+            self.osd_overlay.show_layer(self.osd_skin, key, self.osd_values(), area, timeout_ms)
+        except Exception as e:
+            print(f"Debug: OSD error: {e}")
+
+    def change_volume(self, delta):
+        self.volume_slider.setValue(max(0, min(100, self.volume_slider.value() + delta)))
+
+    def change_channel(self, delta):
+        """Next/previous channel in list order (wraps around)"""
+        if not self.channels:
+            return
+        current = (self.current_channel_data or {}).get('uuid')
+        index = next((i for i, c in enumerate(self.channels) if c.get('uuid') == current), None)
+        if index is None:
+            index = -1 if delta > 0 else 0
+        self.play_channel_by_data(self.channels[(index + delta) % len(self.channels)])
+
+    def setup_osd_shortcuts(self):
+        """Register the Media Center style keys (window-scoped, so they never
+        interfere with typing in the channel search box or other dialogs)"""
+        keymap = dict(self.DEFAULT_KEYMAP)
+        keymap.update(self.config.get('keymap', {}))
+        handlers = {
+            'info': lambda: self.show_osd('miniepg', 8000),
+            'volume_up': lambda: self.change_volume(5),
+            'volume_down': lambda: self.change_volume(-5),
+            'mute': self.toggle_mute_from_key,
+            'channel_up': lambda: self.change_channel(1),
+            'channel_down': lambda: self.change_channel(-1),
+        }
+        for old in self._shortcuts:
+            old.setEnabled(False)
+            old.deleteLater()
+        self._shortcuts = []
+        for action, keys in keymap.items():
+            handler = handlers.get(action)
+            if handler is None:
+                continue
+            for key in str(keys).split(','):
+                key = key.strip()
+                if not key:
+                    continue
+                shortcut = QShortcut(QKeySequence(key), self)
+                shortcut.setContext(Qt.WindowShortcut)
+                shortcut.activated.connect(handler)
+                self._shortcuts.append(shortcut)
+
+    def toggle_mute_from_key(self):
+        self.mute_btn.setChecked(self.media_player.audio_get_mute() != 1)
+        self.toggle_mute()
 
     # ------------------------------------------------------------------
     # Kodi hand-off: launch Kodi, pause live TV while it runs, resume after
@@ -2445,6 +2680,7 @@ class TVHeadendClient(QMainWindow):
     def on_volume_changed(self, value):
         print(f"Debug: Volume changed to {value}")
         self.media_player.audio_set_volume(value)
+        self.show_osd('volume', 2500)
 
     def eventFilter(self, obj, event):
         """Handle double-click and key events"""
@@ -2483,6 +2719,7 @@ class TVHeadendClient(QMainWindow):
             self.mute_btn.setIcon(QIcon(f"{self.icons_dir}/unmute.svg"))
             self.mute_btn.setToolTip("Mute")
             print("Debug: Audio unmuted")
+        self.show_osd('volume', 2500)
 
     def show_about(self):
         """Show the about dialog"""
@@ -3543,6 +3780,8 @@ class TVHeadendClient(QMainWindow):
                 self.statusbar.showMessage(f"Playing: {channel_data['name']}")
                 if hasattr(self, 'favorites_menu'):
                     self.rebuild_favorites_menu()
+                # give VLC a moment to report codec/resolution before showing the info OSD
+                QTimer.singleShot(1500, lambda: self.show_osd('miniepg', 6000))
             else:
                 print(f"Debug: Channel not found: {channel_data['name']}")
                 self.statusbar.showMessage("Channel not found")
