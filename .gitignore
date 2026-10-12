@@ -2,3 +2,6 @@
 /.flatpak-builder
 /.history
 tvhplayer/__pycache__/resources_rc.cpython-313.pyc
+
+# OSD skins are third-party content: users copy them in themselves, never commit them
+OSDskins/
