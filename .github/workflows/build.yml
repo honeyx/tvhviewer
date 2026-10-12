@@ -60,6 +60,7 @@ jobs:
           pyinstaller --onedir --windowed --name=${{ matrix.artifact_name }} `
             --add-data "icons;icons" `
             --collect-all PyQt5 `
+            --paths tvhplayer --hidden-import osdskin `
             tvhplayer/tvhplayer.py
         shell: pwsh
 
@@ -94,6 +95,7 @@ jobs:
           pyinstaller --onefile --windowed --name=${{ matrix.artifact_name }} \
             --add-data "icons:icons" \
             --collect-all PyQt5 \
+            --paths tvhplayer --hidden-import osdskin \
             tvhplayer/tvhplayer.py
         shell: bash
 
@@ -155,6 +157,7 @@ jobs:
           import shutil
           shutil.copy("tvhplayer/__init__.py", f"{root}/usr/lib/python3/dist-packages/tvhplayer/")
           shutil.copy("tvhplayer/tvhplayer.py", f"{root}/usr/lib/python3/dist-packages/tvhplayer/")
+          shutil.copy("tvhplayer/osdskin.py", f"{root}/usr/lib/python3/dist-packages/tvhplayer/")
           for fn in os.listdir("icons"):
               if fn.endswith((".svg", ".png")):
                   shutil.copy(f"icons/{fn}", f"{root}/usr/share/icons/tvhplayer/{fn}")
