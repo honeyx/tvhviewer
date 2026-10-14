@@ -72,8 +72,9 @@ Copy a skin folder you are entitled to use into the `OSDskins` folder
 directory, e.g. `%APPDATA%\TVHplayer\OSDskins` on Windows) and pick it under
 Settings → OSD Skin. The default is *Off*.
 
-Default keys (Windows Media Center keyboard commands, so an MCE remote or a
-programmed Flirc works): `Ctrl+D` info, `F8` mute, `F9`/`F10` volume down/up,
-`PgUp`/`=` and `PgDown`/`-` channel up/down. Override them in the config file
-under `"keymap"` (e.g. `{"keymap": {"info": "I", "channel_up": ""}}`; an empty
-string disables an action).
+Key bindings: Settings → *Keyboard / Remote Keys...* lets you assign keys by
+pressing them (a remote or Flirc just sends key presses) and can import a
+`.remote` profile file; changes apply immediately. The defaults follow a typical
+remote profile: `Ctrl+D` info, `Ctrl+G`/`E` program guide, `K` channel list,
+`M` mute, volume keys, `+`/`-` channel up/down, `PgUp`/`PgDown` next/previous
+favourite, `0`-`9` direct channel entry, `Alt+Enter` fullscreen.
