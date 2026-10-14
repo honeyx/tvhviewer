@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox, QMessageBox, QApplication,
     QPushButton, QLabel, QSlider, QStatusBar, QGridLayout, QMenuBar, QRadioButton, QSpinBox, QGraphicsOpacityEffect, QFileDialog,
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
-    QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction
+    QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction, QKeySequenceEdit
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject, QPoint, QUrl
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics, QDesktopServices
@@ -35,6 +35,7 @@ except ImportError:
     except ImportError:
         osdskin = None
 import json
+import re
 import requests
 # Note: this app loads all icons via filesystem paths (see get_icon()),
 # not Qt's compiled resource system, so no resources_rc import is needed.
@@ -1114,6 +1115,147 @@ class ServerStatusDialog(QDialog):
         self.update_timer.stop()
         super().closeEvent(event)
 
+# --------------------------------------------------------------------------
+# Remote-profile (.remote) import and the key-binding dialog
+# --------------------------------------------------------------------------
+_VK_NAMES = {173: 'Volume Mute', 174: 'Volume Down', 175: 'Volume Up',
+             176: 'Media Next', 177: 'Media Previous', 178: 'Media Stop', 179: 'Media Play'}
+_KEY_ALIASES = {'back': 'Backspace', 'add': '+', 'subtract': '-', 'spacebar': 'Space',
+                'enter': 'Return', 'return': 'Return', 'esc': 'Esc', 'escape': 'Esc',
+                'pgup': 'PgUp', 'pageup': 'PgUp', 'pgdown': 'PgDown', 'pagedown': 'PgDown',
+                'left': 'Left', 'right': 'Right', 'up': 'Up', 'down': 'Down',
+                'home': 'Home', 'end': 'End', 'insert': 'Ins', 'delete': 'Del', 'tab': 'Tab'}
+
+
+def remote_key_to_qt(text):
+    """'CTRL SHIFT 5' / 'ALT Enter' / 'ch175' -> Qt portable key string, or None"""
+    parts = (text or '').split()
+    if not parts:
+        return None
+    modifiers = []
+    for part in parts[:-1]:
+        name = {'ctrl': 'Ctrl', 'shift': 'Shift', 'alt': 'Alt'}.get(part.lower())
+        if name is None:
+            return None
+        modifiers.append(name)
+    key = parts[-1]
+    vk = re.fullmatch(r'ch(\d+)', key, re.I)
+    if vk:
+        key = _VK_NAMES.get(int(vk.group(1)))
+        if key is None:
+            return None
+    else:
+        key = _KEY_ALIASES.get(key.lower(), key.upper() if len(key) == 1 else key)
+    sequence = QKeySequence('+'.join(modifiers + [key]))
+    return None if sequence.isEmpty() else sequence.toString(QKeySequence.PortableText)
+
+
+def parse_remote_file(path):
+    """Read a DVBViewer-style .remote XML profile.
+    Returns {command name: [Qt key strings]} for the keyboard events in it."""
+    import xml.etree.ElementTree as ET
+    result = {}
+    for command in ET.parse(path).getroot().iter('Command'):
+        name = command.get('Name')
+        keys = []
+        for event in command.iter('Event'):
+            if (event.get('Source') or '').lower() != 'keyboard':
+                continue
+            key = remote_key_to_qt(event.text)
+            if key and key not in keys:
+                keys.append(key)
+        if name and keys:
+            result[name] = keys
+    return result
+
+
+class KeyMapDialog(QDialog):
+    """Assign keys by pressing them (what a remote / Flirc sends is just keys)"""
+
+    def __init__(self, keymap, defaults, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard / Remote Keys")
+        self.resize(560, 560)
+        self._defaults = defaults
+        self._commands = list(defaults.keys())
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Click a field and press the key (or the remote button) to assign it.\n"
+                                "Backspace/Delete clears a field."))
+        self.table = QTableWidget(len(self._commands), 3)
+        self.table.setHorizontalHeaderLabels(['Command', 'Key', 'Alternative key'])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.edits = []
+        for row, command in enumerate(self._commands):
+            item = QTableWidgetItem(command)
+            item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row, 0, item)
+            pair = []
+            for col in (1, 2):
+                edit = QKeySequenceEdit()
+                edit.keySequenceChanged.connect(lambda seq, e=edit: self._keep_one_chord(e, seq))
+                self.table.setCellWidget(row, col, edit)
+                pair.append(edit)
+            self.edits.append(pair)
+        layout.addWidget(self.table)
+        self._fill(keymap)
+
+        buttons = QHBoxLayout()
+        import_btn = QPushButton("Import .remote file...")
+        import_btn.clicked.connect(self.import_remote)
+        reset_btn = QPushButton("Defaults")
+        reset_btn.clicked.connect(lambda: self._fill(self._defaults))
+        buttons.addWidget(import_btn)
+        buttons.addWidget(reset_btn)
+        buttons.addStretch()
+        box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        buttons.addWidget(box)
+        layout.addLayout(buttons)
+
+    @staticmethod
+    def _keep_one_chord(edit, sequence):
+        """QKeySequenceEdit happily records chords like 'Ctrl+K, C'; we only
+        store single keys, so keep the first chord."""
+        if sequence.count() > 1:
+            edit.blockSignals(True)
+            edit.setKeySequence(QKeySequence(sequence[0]))
+            edit.blockSignals(False)
+
+    def _fill(self, keymap):
+        for command, pair in zip(self._commands, self.edits):
+            keys = [k.strip() for k in str(keymap.get(command, '')).split(',') if k.strip()]
+            for edit, key in zip(pair, keys + ['', '']):
+                edit.setKeySequence(QKeySequence(key))
+
+    def import_remote(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import remote profile", str(Path.home()),
+                                              "Remote profiles (*.remote *.xml);;All Files (*)",
+                                              options=QFileDialog.DontUseNativeDialog)
+        if not path:
+            return
+        try:
+            imported = parse_remote_file(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Import failed", f"Couldn't read that file:\n{e}")
+            return
+        matched = {c: k for c, k in imported.items() if c in self._commands}
+        self._fill({c: ', '.join(k[:2]) for c, k in matched.items()})  # commands not in the file get cleared
+        QMessageBox.information(
+            self, "Import",
+            f"Imported {len(matched)} commands; {len(imported) - len(matched)} others in the file "
+            "aren't supported yet and were skipped.\nCommands missing from the file were cleared.")
+
+    def result_keymap(self):
+        result = {}
+        for command, pair in zip(self._commands, self.edits):
+            keys = [e.keySequence().toString(QKeySequence.PortableText) for e in pair]
+            result[command] = ', '.join(k for k in keys if k)
+        return result
+
+
 class TVHeadendClient(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1184,6 +1326,11 @@ class TVHeadendClient(QMainWindow):
         self.osd_overlay = None
         self._osd_ready = False  # stays False briefly at startup so the initial volume sync doesn't pop an OSD
         self._shortcuts = []
+        self._muted = False
+        self._digit_buffer = ''
+        self._digit_timer = QTimer(self)
+        self._digit_timer.setSingleShot(True)
+        self._digit_timer.timeout.connect(self._tune_number)
 
         # Kodi hand-off state (see launch_kodi)
         self.kodi_active = False
@@ -1475,7 +1622,6 @@ class TVHeadendClient(QMainWindow):
 
         # EPG menu
         epg_guide_action_menu = QAction("Program Guide (All Channels)...", self)
-        epg_guide_action_menu.setShortcut("Ctrl+G")
         epg_guide_action_menu.triggered.connect(self.show_epg_grid)
         epg_menu.addAction(epg_guide_action_menu)
 
@@ -1498,6 +1644,10 @@ class TVHeadendClient(QMainWindow):
         kodi_path_action = QAction("Kodi Path...", self)
         kodi_path_action.triggered.connect(self.set_kodi_path)
         settings_menu.addAction(kodi_path_action)
+
+        keys_action = QAction("Keyboard / Remote Keys...", self)
+        keys_action.triggered.connect(self.edit_keymap)
+        settings_menu.addAction(keys_action)
 
         self.osd_menu = settings_menu.addMenu("OSD Skin")
         self.osd_action_group = QActionGroup(self)
@@ -1570,6 +1720,7 @@ class TVHeadendClient(QMainWindow):
         self.volume_slider.setValue(100)
         self.volume_slider.setFixedWidth(110)
         self.volume_slider.setToolTip("Volume")
+        self.volume_slider.setFocusPolicy(Qt.NoFocus)  # otherwise Up/Down change the volume
         self.volume_slider.valueChanged.connect(self.on_volume_changed)
         toolbar.addWidget(self.volume_slider)
         # The slider was set above *before* connecting valueChanged, so no
@@ -1989,17 +2140,25 @@ class TVHeadendClient(QMainWindow):
     # ------------------------------------------------------------------
     # OSD: skin-driven on-screen display + Media Center style key bindings
     # ------------------------------------------------------------------
-    DEFAULT_KEYMAP = {
-        # Windows Media Center keyboard commands (what an MCE remote or a
-        # programmed Flirc sends). Several keys per action: comma separated.
-        # Override in the config file under "keymap"; "" disables an action.
-        'info': 'Ctrl+D',
-        'volume_down': 'F9',
-        'volume_up': 'F10',
-        'mute': 'F8',
-        'channel_up': 'PgUp, =',
-        'channel_down': 'PgDown, -',
-    }
+    # Command names follow the DVBViewer remote-profile (.remote) naming so such a
+    # file can be imported. Several keys per command: comma separated.
+    DEFAULT_KEYMAP = dict({
+        'OSD Menu': 'Ctrl+D',
+        'OSD Clock': '',
+        'OSD EPG': 'Ctrl+G',
+        'EPG Window': 'E',
+        'Channel List': 'K',
+        'Mute': 'M, Volume Mute',
+        'Volume Up': 'Volume Up, Ctrl+Up',
+        'Volume Down': 'Volume Down, Ctrl+Down',
+        'Channel Plus': '+',
+        'Channel Minus': '-',
+        'Favourite Plus': 'PgUp',
+        'Favourite Minus': 'PgDown',
+        'Full Screen': 'Alt+Return',
+        'Play': 'Ctrl+P',
+        'Stop': 'Ctrl+Shift+5',
+    }, **{f'Number {d}': str(d) for d in range(10)})
 
     def load_osd_skin(self):
         self.osd_skin = None
@@ -2096,7 +2255,7 @@ class TVHeadendClient(QMainWindow):
 
     def osd_values(self):
         """Everything a skin can ask for, keyed by lower-case placeholder name"""
-        muted = self.media_player.audio_get_mute() == 1
+        muted = self._muted
         proc = getattr(self, 'ffmpeg_process', None)
         values = {
             '_now': datetime.now(),
@@ -2159,39 +2318,102 @@ class TVHeadendClient(QMainWindow):
             index = -1 if delta > 0 else 0
         self.play_channel_by_data(self.channels[(index + delta) % len(self.channels)])
 
-    def setup_osd_shortcuts(self):
-        """Register the Media Center style keys (window-scoped, so they never
-        interfere with typing in the channel search box or other dialogs)"""
-        keymap = dict(self.DEFAULT_KEYMAP)
-        keymap.update(self.config.get('keymap', {}))
+    def keymap_handlers(self):
         handlers = {
-            'info': lambda: self.show_osd('miniepg', 8000),
-            'volume_up': lambda: self.change_volume(5),
-            'volume_down': lambda: self.change_volume(-5),
-            'mute': self.toggle_mute_from_key,
-            'channel_up': lambda: self.change_channel(1),
-            'channel_down': lambda: self.change_channel(-1),
+            'OSD Menu': lambda: self.show_osd('miniepg', 8000),
+            'OSD Clock': lambda: self.show_osd('clock', 4000),
+            'OSD EPG': self.show_epg_grid,  # the skin's own guide window isn't implemented yet
+            'EPG Window': self.show_epg_grid,
+            'Channel List': self.show_channel_dialog,
+            'Mute': self.toggle_mute_from_key,
+            'Volume Up': lambda: self.change_volume(5),
+            'Volume Down': lambda: self.change_volume(-5),
+            'Channel Plus': lambda: self.change_channel(1),
+            'Channel Minus': lambda: self.change_channel(-1),
+            'Favourite Plus': lambda: self.change_favourite(1),
+            'Favourite Minus': lambda: self.change_favourite(-1),
+            'Full Screen': self.toggle_fullscreen,
+            'Play': self.play_button_clicked,
+            'Stop': self.stop_playback,
         }
+        for digit in range(10):
+            handlers[f'Number {digit}'] = (lambda d=digit: self.osd_digit(d))
+        return handlers
+
+    def effective_keymap(self):
+        keymap = dict(self.DEFAULT_KEYMAP)
+        saved = self.config.get('keymap', {})
+        if isinstance(saved, dict):
+            keymap.update({k: v for k, v in saved.items() if k in keymap})
+        return keymap
+
+    def setup_osd_shortcuts(self):
+        """(Re)register the key bindings. Window-scoped, so they never get in
+        the way of typing in the channel search box or other dialogs."""
         for old in self._shortcuts:
             old.setEnabled(False)
             old.deleteLater()
         self._shortcuts = []
-        for action, keys in keymap.items():
-            handler = handlers.get(action)
+        handlers = self.keymap_handlers()
+        used = {}
+        for command, keys in self.effective_keymap().items():
+            handler = handlers.get(command)
             if handler is None:
                 continue
             for key in str(keys).split(','):
-                key = key.strip()
-                if not key:
+                sequence = QKeySequence(key.strip())
+                if sequence.isEmpty():
                     continue
-                shortcut = QShortcut(QKeySequence(key), self)
+                portable = sequence.toString(QKeySequence.PortableText)
+                if portable in used:  # two shortcuts on one key would cancel each other out
+                    print(f"Debug: key {portable} already used by '{used[portable]}', ignoring it for '{command}'")
+                    continue
+                used[portable] = command
+                shortcut = QShortcut(sequence, self)
                 shortcut.setContext(Qt.WindowShortcut)
                 shortcut.activated.connect(handler)
                 self._shortcuts.append(shortcut)
 
+    def edit_keymap(self):
+        dialog = KeyMapDialog(self.effective_keymap(), self.DEFAULT_KEYMAP, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.config['keymap'] = dialog.result_keymap()
+            self.save_config()
+            self.setup_osd_shortcuts()
+            self.statusbar.showMessage("Key bindings saved")
+
     def toggle_mute_from_key(self):
-        self.mute_btn.setChecked(self.media_player.audio_get_mute() != 1)
         self.toggle_mute()
+
+    def change_favourite(self, delta):
+        """Next/previous favourite channel (wraps around)"""
+        by_name = {c.get('name'): c for c in self.channels}
+        favourites = [by_name[n] for n in self.config.get('favorites', []) if n in by_name]
+        if not favourites:
+            self.statusbar.showMessage("No favourites defined")
+            return
+        current = (self.current_channel_data or {}).get('name')
+        index = next((i for i, c in enumerate(favourites) if c.get('name') == current), None)
+        if index is None:
+            index = -1 if delta > 0 else 0
+        self.play_channel_by_data(favourites[(index + delta) % len(favourites)])
+
+    def osd_digit(self, digit):
+        """Direct channel entry: digits collect for 1.5 s, then tune"""
+        self._digit_buffer = (self._digit_buffer + str(digit))[-4:]
+        self.statusbar.showMessage(f"Channel: {self._digit_buffer}_")
+        self._digit_timer.start(1500)
+
+    def _tune_number(self):
+        wanted, self._digit_buffer = self._digit_buffer, ''
+        for channel in self.channels:
+            try:
+                if int(channel.get('number') or -1) == int(wanted):
+                    self.play_channel_by_data(channel)
+                    return
+            except (TypeError, ValueError):
+                continue
+        self.statusbar.showMessage(f"No channel {wanted}")
 
     # ------------------------------------------------------------------
     # Kodi hand-off: launch Kodi, pause live TV while it runs, resume after
@@ -2708,10 +2930,14 @@ class TVHeadendClient(QMainWindow):
     def toggle_mute(self):
         """Toggle audio mute state"""
         print("Debug: Toggling mute")
-        is_muted = self.media_player.audio_get_mute()
-        self.media_player.audio_set_mute(not is_muted)
+        # Track the state ourselves: VLC's audio_get_mute() returns the old
+        # value (or -1) right after audio_set_mute(), which made both the
+        # button and the OSD show the opposite state.
+        self._muted = not self._muted
+        self.media_player.audio_set_mute(self._muted)
+        self.mute_btn.setChecked(self._muted)
         
-        if not is_muted:  # Switching to muted
+        if self._muted:  # Switching to muted
             self.mute_btn.setIcon(QIcon(f"{self.icons_dir}/mute.svg"))
             self.mute_btn.setToolTip("Unmute")
             print("Debug: Audio muted")
