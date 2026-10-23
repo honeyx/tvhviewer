@@ -21,9 +21,11 @@ WINDOW_FILES = {
     'volume': 'myVolume.xml',
     'clock': 'myClock.xml',
     'miniepg': 'myMiniEPG.xml',
+    'channels': 'mychannels.xml',
 }
 
 _TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*')
+_TIME_TOKEN = re.compile(r'#Time\.[^\s#]+', re.I)
 _TIME_PARTS = re.compile(r'yyyy|mmmm|dddd|hh|nn|ss|dd|mm')
 _TIME_MAP = {'yyyy': '%Y', 'mmmm': '%B', 'dddd': '%A', 'hh': '%H',
              'nn': '%M', 'ss': '%S', 'dd': '%d', 'mm': '%m'}
@@ -52,18 +54,24 @@ def _num(fields, key, default=0.0):
         return float(default)
 
 
+def _parse_control(element):
+    """A control as a dict of its fields plus 'subs' (parsed recursively)"""
+    ctl = _fields(element)
+    subs = element.find('subcontrols')
+    ctl['subs'] = [_parse_control(sub) for sub in subs] if subs is not None else []
+    return ctl
+
+
 class OSDWindow:
     """One parsed skin window: a flat list of controls (dicts)"""
 
     def __init__(self, path):
         root = ET.parse(path).getroot()
+        self.default_focus = (root.get('default') or '').strip()
         self.controls = []
+        self.has_bg = (root.get('hasbg') or '').strip().lower() == 'true'
         items = root.find('items')
-        for item in (items if items is not None else []):
-            ctl = _fields(item)
-            subs = item.find('subcontrols')
-            ctl['subs'] = [_fields(sub) for sub in subs] if subs is not None else []
-            self.controls.append(ctl)
+        self.controls = [_parse_control(item) for item in (items if items is not None else [])]
 
 
 class OSDSkin:
@@ -74,6 +82,7 @@ class OSDSkin:
         self.author = ''
         self.fonts = {}
         self.label_defaults = {}
+        self.list_defaults = {}
         self._windows = {}
         self._pixmaps = {}
         self._image_index = None
@@ -121,10 +130,13 @@ class OSDSkin:
             return
         for control in root.findall('control'):
             fields = _fields(control)
-            if fields.get('type', '').lower() == 'label':
+            kind = fields.get('type', '').lower()
+            if kind == 'label' and not self.label_defaults:
                 self.label_defaults = {k: v for k, v in fields.items()
                                        if k in ('font', 'textcolor', 'verticalalign', 'align')}
-                break
+            elif kind == 'listcontrol' and not self.list_defaults:
+                self.list_defaults = {k: v for k, v in fields.items() if k not in (
+                    'x', 'y', 'width', 'height', 'id', 'description', 'type')}
 
     @staticmethod
     def is_skin_folder(folder):
@@ -140,6 +152,9 @@ class OSDSkin:
                 for ctl in window.controls:
                     if ctl.get('type', '').lower() == 'label':
                         for k, v in self.label_defaults.items():
+                            ctl.setdefault(k, v)
+                    elif ctl.get('type', '').lower() == 'listcontrol':
+                        for k, v in self.list_defaults.items():
                             ctl.setdefault(k, v)
             self._windows[key] = window
         return self._windows[key]
@@ -172,14 +187,16 @@ class OSDSkin:
 
 def expand(text, values):
     """Replace #placeholders in a skin string using values (lower-case keys)"""
+    def time_sub(match):
+        fmt = _TIME_PARTS.sub(lambda m: _TIME_MAP[m.group(0)], match.group(0)[6:].replace('_', ' '))
+        return values.get('_now', datetime.now()).strftime(fmt)
+
     def sub(match):
-        token = match.group(0)
-        low = token.lower()
-        if low.startswith('#time.'):
-            fmt = _TIME_PARTS.sub(lambda m: _TIME_MAP[m.group(0)], token[6:].replace('_', ' '))
-            return values.get('_now', datetime.now()).strftime(fmt)
-        return str(values.get(low[1:], ''))
-    return _TOKEN.sub(sub, text or '').strip() if text and '#' in text else (text or '')
+        return str(values.get(match.group(0).lower()[1:], ''))
+    if not text or '#' not in text:
+        return text or ''
+    text = _TIME_TOKEN.sub(time_sub, text)
+    return _TOKEN.sub(sub, text).strip()
 
 
 def _rect(ctl, parent=None):
@@ -219,10 +236,17 @@ def _draw_image(painter, skin, ctl, values, rect):
         if target.width() <= 0 or target.height() <= 0:
             target = QRectF(rect.x(), rect.y(), pix.width(), pix.height())
         painter.drawPixmap(target, pix, QRectF(pix.rect()))
-    elif ctl.get('graphicstyp', '').lower() == 'rectangle' and ctl.get('color'):
+    elif ctl.get('graphicstyp', '').lower() in ('rectangle', 'gradient_rectangle') and ctl.get('color'):
         color = parse_color(ctl['color'])
         if color.alpha() and rect.width() > 0 and rect.height() > 0:
-            painter.fillRect(rect, color)
+            if ctl.get('color2') and 'gradient' in ctl.get('graphicstyp', '').lower():
+                from PyQt5.QtGui import QLinearGradient
+                grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+                grad.setColorAt(0, color)
+                grad.setColorAt(1, parse_color(ctl['color2']))
+                painter.fillRect(rect, grad)
+            else:
+                painter.fillRect(rect, color)
 
 
 def _draw_label(painter, skin, ctl, values, rect):
@@ -266,7 +290,7 @@ def _draw_progress(painter, skin, ctl, values, rect):
         painter.restore()
 
 
-def render(painter, skin, key, values, width, height):
+def render(painter, skin, key, values, width, height, screen=None):
     """Paint OSD window `key` (volume/clock/miniepg) into a width x height area"""
     window = skin.window(key)
     if window is None:
@@ -275,6 +299,10 @@ def render(painter, skin, key, values, width, height):
     painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
                            QPainter.SmoothPixmapTransform)
     painter.scale(width / skin.size_x, height / skin.size_y)
+    if screen is not None and window.has_bg:
+        backdrop = skin.pixmap('background.png')
+        if backdrop is not None:
+            painter.drawPixmap(QRectF(0, 0, skin.size_x, skin.size_y), backdrop, QRectF(backdrop.rect()))
     for ctl in window.controls:
         if _hidden(ctl, values):
             continue
@@ -286,8 +314,155 @@ def render(painter, skin, key, values, width, height):
             _draw_label(painter, skin, ctl, values, rect)
         elif ctype in ('progress', 'tickprogress'):
             _draw_progress(painter, skin, ctl, values, rect)
+        elif ctype == 'listcontrol' and screen is not None and ctl.get('id') in screen.lists:
+            _draw_list(painter, skin, ctl, screen.lists[ctl['id']], screen.focus == ctl['id'])
         # buttons / spincontrols / videowindow are interactive or HTPC-only: skipped
     painter.restore()
+
+
+def _sub(ctl, name):
+    """Find a sub-control by description, searching nested sub-controls too"""
+    for sub in ctl.get('subs', []):
+        if sub.get('description', '').lower() == name:
+            return sub
+        found = _sub(sub, name)
+        if found:
+            return found
+    return None
+
+
+def _draw_list(painter, skin, ctl, lst, focused):
+    """Rows of a skin ListControl: row background, icon and up to three labels"""
+    rect = _rect(ctl)
+    item_h = _num(ctl, 'itemheight', 40) or 40
+    space = _num(ctl, 'space', 0)
+    step = item_h + space
+    focus_img, nofocus_img = _sub(ctl, 'imgfocus'), _sub(ctl, 'imgnofocus')
+    painter.save()
+    painter.setClipRect(rect)
+    rows = lst.visible_rows(step)
+    for row in range(rows):
+        index = lst.top + row
+        if index >= len(lst.items):
+            break
+        item = lst.items[index]
+        row_rect = QRectF(rect.x(), rect.y() + row * step, rect.width(), item_h)
+        selected = index == lst.selected
+        highlighted = selected and focused
+        if nofocus_img:
+            _draw_image(painter, skin, dict(nofocus_img), {}, QRectF(row_rect))
+        if selected and focused and focus_img:
+            _draw_image(painter, skin, dict(focus_img), {}, QRectF(row_rect))
+        elif selected and not focused:
+            painter.fillRect(row_rect, QColor(255, 255, 255, 40))
+        # icon
+        pix = skin.pixmap(item.get('icon', ''))
+        iw, ih = _num(ctl, 'imagewidth', 0), _num(ctl, 'imageheight', 0)
+        if pix is not None and iw and ih:
+            painter.drawPixmap(QRectF(row_rect.x() + _num(ctl, 'iconoffsetx', 0),
+                                      row_rect.y() + _num(ctl, 'iconoffsety', 0), iw, ih),
+                               pix, QRectF(pix.rect()))
+        # up to three text columns
+        for n, suffix in ((1, ''), (2, '2'), (3, '3')):
+            text = item.get('label%d' % n, '')
+            if not text or ctl.get('textvisible%d' % n, 'true').lower() == 'false':
+                continue
+            font = skin.qfont(ctl.get('font' + suffix))
+            painter.setFont(font)
+            ox = _num(ctl, 'textoffsetx' + suffix, _num(ctl, 'textoffsetx', 0) if n == 1 else 0)
+            has_oy = ('textoffsety' + suffix) in ctl
+            oy = _num(ctl, 'textoffsety' + suffix, 0)
+            color = ctl.get(('selectedcolor' if highlighted else 'textcolor') + suffix) or \
+                ctl.get('selectedcolor' if highlighted else 'textcolor') or ('FF000000' if highlighted else 'FFFFFFFF')
+            painter.setPen(parse_color(color))
+            text_rect = QRectF(row_rect.x() + ox, row_rect.y() + (oy if has_oy else 0),
+                               row_rect.width() - ox - 6, (item_h - oy) if has_oy else item_h)
+            vflag = Qt.AlignTop if has_oy else Qt.AlignVCenter
+            hflag = Qt.AlignRight if (n == 1 and ctl.get('align1', '').lower() == 'right') else Qt.AlignLeft
+            painter.drawText(text_rect, int(hflag | vflag), text)
+    painter.restore()
+
+
+class OSDList:
+    """Items + selection/scroll state of one list control"""
+
+    def __init__(self):
+        self.items = []
+        self.selected = 0
+        self.top = 0
+        self._rows = 8
+
+    def visible_rows(self, step):
+        return self._rows
+
+    def set_items(self, items, selected=0):
+        self.items = items
+        self.selected = max(0, min(selected, len(items) - 1)) if items else 0
+        self.top = 0
+        self._scroll_into_view()
+
+    def move(self, delta):
+        if not self.items:
+            return False
+        new = max(0, min(len(self.items) - 1, self.selected + delta))
+        changed = new != self.selected
+        self.selected = new
+        self._scroll_into_view()
+        return changed
+
+    def _scroll_into_view(self):
+        if self.selected < self.top:
+            self.top = self.selected
+        elif self.selected >= self.top + self._rows:
+            self.top = self.selected - self._rows + 1
+
+    @property
+    def current(self):
+        return self.items[self.selected] if self.items else None
+
+
+class OSDScreen:
+    """Runtime state of an interactive OSD window: which list has focus,
+    selections, and the remote-control actions that move around."""
+
+    def __init__(self, skin, key, on_ok=None, on_change=None):
+        self.skin, self.key = skin, key
+        self.on_ok, self.on_change = on_ok, on_change
+        self.window = skin.window(key)
+        self.lists = {}
+        self.values = {}
+        self.focus = None
+        for ctl in self.window.controls if self.window else []:
+            if ctl.get('type', '').lower() == 'listcontrol':
+                lst = OSDList()
+                item_h = (_num(ctl, 'itemheight', 40) or 40) + _num(ctl, 'space', 0)
+                lst._rows = max(1, int(_rect(ctl).height() // item_h))
+                self.lists[ctl.get('id')] = lst
+                self._ctl_by_id = getattr(self, '_ctl_by_id', {})
+                self._ctl_by_id[ctl.get('id')] = ctl
+        default = self.window.default_focus if self.window else ''
+        self.focus = default if default in self.lists else next(iter(self.lists), None)
+
+    def handle(self, action):
+        """action: up/down/left/right/ok/back/pageup/pagedown. True if used."""
+        lst = self.lists.get(self.focus)
+        ctl = getattr(self, '_ctl_by_id', {}).get(self.focus, {})
+        if lst is None:
+            return False
+        if action in ('up', 'down', 'pageup', 'pagedown'):
+            step = {'up': -1, 'down': 1, 'pageup': -lst._rows, 'pagedown': lst._rows}[action]
+            if lst.move(step) and self.on_change:
+                self.on_change(self.focus, lst.current)
+            return True
+        if action in ('left', 'right'):
+            target = ctl.get(action, '')
+            if target in self.lists and target != self.focus:
+                self.focus = target
+            return True
+        if action == 'ok' and self.on_ok:
+            self.on_ok(self.focus, lst.current)
+            return True
+        return False
 
 
 def find_skins(root_folder):
@@ -315,6 +490,7 @@ class OSDOverlay(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.skin = None
+        self.screen = None  # OSDScreen drawn on the 'screen' layer
         self.values = {}
         self.layers = {}  # key -> deadline (time.monotonic()), None = stay
         from PyQt5.QtCore import QTimer
@@ -357,5 +533,10 @@ class OSDOverlay(QWidget):
             return
         painter = QPainter(self)
         for key in list(self.layers):
-            render(painter, self.skin, key, self.values, self.width(), self.height())
+            if key == 'screen':
+                if self.screen is not None:
+                    render(painter, self.skin, self.screen.key, {**self.values, **self.screen.values},
+                           self.width(), self.height(), self.screen)
+            else:
+                render(painter, self.skin, key, self.values, self.width(), self.height())
         painter.end()
