@@ -1242,11 +1242,29 @@ class KeyMapDialog(QDialog):
             QMessageBox.warning(self, "Import failed", f"Couldn't read that file:\n{e}")
             return
         matched = {c: k for c, k in imported.items() if c in self._commands}
-        self._fill({c: ', '.join(k[:2]) for c, k in matched.items()})  # commands not in the file get cleared
+        # Merge: commands present in the file take its keys; everything else
+        # keeps its current binding (a profile often leaves e.g. 'OSD OK' empty
+        # because the host handles Enter itself) - except keys the file now
+        # uses for something else.
+        merged = self.result_keymap()
+        taken = {key for keys in matched.values() for key in keys[:2]}
+        changed = 0
+        for command in self._commands:
+            if command in matched:
+                merged[command] = ', '.join(matched[command][:2])
+            else:
+                kept = [k.strip() for k in merged[command].split(',') if k.strip()]
+                remaining = [k for k in kept if k not in taken]
+                if remaining != kept:
+                    changed += 1
+                merged[command] = ', '.join(remaining)
+        self._fill(merged)
         QMessageBox.information(
             self, "Import",
-            f"Imported {len(matched)} commands; {len(imported) - len(matched)} others in the file "
-            "aren't supported yet and were skipped.\nCommands missing from the file were cleared.")
+            f"Imported keys for {len(matched)} commands; {len(imported) - len(matched)} others in the file "
+            "aren't supported yet and were skipped.\n"
+            "Commands the file doesn't mention keep their current keys"
+            + (f" (except {changed} that lost a key the file now uses elsewhere)." if changed else "."))
 
     def result_keymap(self):
         result = {}
@@ -1320,12 +1338,15 @@ class TVHeadendClient(QMainWindow):
 
         # OSD (on-screen display) rendered from user-supplied skins that live
         # in <config dir>/OSDskins - none are shipped with TVHviewer
+        self.install_crash_log()
         self.osd_skins_dir = os.path.join(self.config_dir, 'OSDskins')
         os.makedirs(self.osd_skins_dir, exist_ok=True)
         self.osd_skin = None
         self.osd_overlay = None
         self._osd_ready = False  # stays False briefly at startup so the initial volume sync doesn't pop an OSD
         self._shortcuts = []
+        self._shortcut_cmds = []
+        self.osd_screen = None
         self._muted = False
         self._digit_buffer = ''
         self._digit_timer = QTimer(self)
@@ -2148,6 +2169,14 @@ class TVHeadendClient(QMainWindow):
         'OSD EPG': 'Ctrl+G',
         'EPG Window': 'E',
         'Channel List': 'K',
+        'OSD Channel List': '',
+        'OSD Favourites List': 'Ctrl+O',
+        'OSD Up': 'Up',
+        'OSD Down': 'Down',
+        'OSD Left': 'Left',
+        'OSD Right': 'Right',
+        'OSD OK': 'Return, Enter',
+        'OSD Back': 'Backspace, Esc',
         'Mute': 'M, Volume Mute',
         'Volume Up': 'Volume Up, Ctrl+Up',
         'Volume Down': 'Volume Down, Ctrl+Down',
@@ -2159,6 +2188,33 @@ class TVHeadendClient(QMainWindow):
         'Play': 'Ctrl+P',
         'Stop': 'Ctrl+Shift+5',
     }, **{f'Number {d}': str(d) for d in range(10)})
+
+    def install_crash_log(self):
+        """Log unhandled exceptions and hard crashes to <config dir>/tvhviewer.log.
+        Without an exception hook PyQt5 aborts the process on an exception in a
+        slot (the app just vanishes), and the windowed build has no console."""
+        import faulthandler
+        import traceback
+        log_path = os.path.join(self.config_dir, 'tvhviewer.log')
+        try:
+            self._crash_log = open(log_path, 'a', buffering=1, encoding='utf-8')
+            faulthandler.enable(self._crash_log, all_threads=True)
+        except Exception:
+            self._crash_log = None
+
+        def hook(exc_type, exc, tb):
+            text = ''.join(traceback.format_exception(exc_type, exc, tb))
+            if self._crash_log:
+                self._crash_log.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Unhandled exception:\n{text}")
+            try:
+                sys.__stderr__.write(text)
+            except Exception:
+                pass
+            try:
+                self.statusbar.showMessage(f"Error: {exc} (details in tvhviewer.log)")
+            except Exception:
+                pass
+        sys.excepthook = hook
 
     def load_osd_skin(self):
         self.osd_skin = None
@@ -2211,8 +2267,10 @@ class TVHeadendClient(QMainWindow):
         if self.osd_skin is not None:
             self._osd_ready = True
             self.show_osd('miniepg', 5000)  # preview
-        elif self.osd_overlay is not None:
-            self.osd_overlay.hide()
+        else:
+            self.close_osd_window()
+            if self.osd_overlay is not None:
+                self.osd_overlay.hide()
 
     def open_osd_folder(self):
         os.makedirs(self.osd_skins_dir, exist_ok=True)
@@ -2305,6 +2363,102 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             print(f"Debug: OSD error: {e}")
 
+    OSD_NAV_COMMANDS = ('OSD Up', 'OSD Down', 'OSD Left', 'OSD Right', 'OSD OK', 'OSD Back')
+    # keys that keep working while an OSD window has the remote
+    OSD_PASSTHROUGH = ('Mute', 'Volume Up', 'Volume Down')
+
+    def apply_osd_input_state(self):
+        """While an OSD window is open the remote navigates it: the OSD keys
+        are live and the global ones (channel +/-, digits, ...) are parked."""
+        active = self.osd_screen is not None
+        for shortcut, command in self._shortcut_cmds:
+            if command in self.OSD_NAV_COMMANDS:
+                shortcut.setEnabled(active)
+            else:
+                shortcut.setEnabled(not active or command in self.OSD_PASSTHROUGH)
+
+    def open_channel_list(self):
+        """K: the skinned channel list when an OSD skin is on, else the plain dialog"""
+        if self.osd_skin is not None and self.osd_skin.window('channels') is not None:
+            self.open_osd_window('channels')
+        else:
+            self.show_channel_dialog()
+
+    def open_osd_window(self, key, favourites=False):
+        if osdskin is None or self.osd_skin is None or self.osd_skin.window(key) is None:
+            self.statusbar.showMessage("Select an OSD skin first (Settings -> OSD Skin)")
+            return
+        if key == 'channels':
+            channels = self.channels
+            if favourites:
+                names = self.config.get('favorites', [])
+                by_name = {c.get('name'): c for c in self.channels}
+                channels = [by_name[n] for n in names if n in by_name]
+            if not channels:
+                self.statusbar.showMessage("No channels to show")
+                return
+            screen = osdskin.OSDScreen(self.osd_skin, 'channels', on_ok=self._osd_ok, on_change=self._osd_changed)
+            current = (self.current_channel_data or {}).get('uuid')
+            items = [{'label1': f"{c.get('number') or ''}  {c.get('name', '')}".strip(), 'icon': '', 'data': c}
+                     for c in channels]
+            start = next((i for i, c in enumerate(channels) if c.get('uuid') == current), 0)
+            screen.lists['2'].set_items(items, start)
+            self.osd_screen = screen
+            self._osd_fill_events()
+        if self.osd_overlay is None:
+            self.osd_overlay = osdskin.OSDOverlay(self)
+        self.osd_overlay.screen = self.osd_screen
+        area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+        self.osd_overlay.show_layer(self.osd_skin, 'screen', self.osd_values(), area, None)
+        self.apply_osd_input_state()
+
+    def close_osd_window(self):
+        self.osd_screen = None
+        if self.osd_overlay is not None:
+            self.osd_overlay.screen = None
+            self.osd_overlay.hide_layer('screen')
+        self.apply_osd_input_state()
+
+    def osd_action(self, action):
+        if self.osd_screen is None:
+            return
+        if action == 'back':
+            self.close_osd_window()
+        else:
+            self.osd_screen.handle(action)
+            if self.osd_overlay is not None:
+                self.osd_overlay.update()
+
+    def _osd_fill_events(self):
+        """Right-hand list: upcoming programmes of the highlighted channel"""
+        screen = self.osd_screen
+        if screen is None or '100' not in screen.lists:
+            return
+        entry = screen.lists['2'].current
+        channel = entry['data'] if entry else {}
+        now_ts = time.time()
+        events = [e for e in self.epg_cache['events_by_channel'].get(channel.get('uuid'), [])
+                  if e.get('stop', 0) > now_ts][:40]
+        items = []
+        for ev in events:
+            start = datetime.fromtimestamp(ev['start']).strftime('%H:%M')
+            stop = datetime.fromtimestamp(ev['stop']).strftime('%H:%M')
+            desc = _epg_text(ev.get('description'), _epg_text(ev.get('summary')))
+            items.append({'label1': _epg_text(ev.get('title'), 'No title'),
+                          'label3': f"{start} - {stop}  {desc}".strip(), 'icon': '', 'data': ev})
+        screen.lists['100'].set_items(items, 0)
+        screen.values = {'channelname': channel.get('name', ''), 'channelnr': str(channel.get('number') or '')}
+
+    def _osd_changed(self, list_id, item):
+        if list_id == '2':
+            self._osd_fill_events()
+
+    def _osd_ok(self, list_id, item):
+        if list_id == '2' and item:
+            channel = item['data']
+            self.close_osd_window()
+            self.play_channel_by_data(channel)
+
     def change_volume(self, delta):
         self.volume_slider.setValue(max(0, min(100, self.volume_slider.value() + delta)))
 
@@ -2324,7 +2478,15 @@ class TVHeadendClient(QMainWindow):
             'OSD Clock': lambda: self.show_osd('clock', 4000),
             'OSD EPG': self.show_epg_grid,  # the skin's own guide window isn't implemented yet
             'EPG Window': self.show_epg_grid,
-            'Channel List': self.show_channel_dialog,
+            'Channel List': self.open_channel_list,
+            'OSD Channel List': lambda: self.open_osd_window('channels'),
+            'OSD Favourites List': lambda: self.open_osd_window('channels', favourites=True),
+            'OSD Up': lambda: self.osd_action('up'),
+            'OSD Down': lambda: self.osd_action('down'),
+            'OSD Left': lambda: self.osd_action('left'),
+            'OSD Right': lambda: self.osd_action('right'),
+            'OSD OK': lambda: self.osd_action('ok'),
+            'OSD Back': lambda: self.osd_action('back'),
             'Mute': self.toggle_mute_from_key,
             'Volume Up': lambda: self.change_volume(5),
             'Volume Down': lambda: self.change_volume(-5),
@@ -2354,6 +2516,7 @@ class TVHeadendClient(QMainWindow):
             old.setEnabled(False)
             old.deleteLater()
         self._shortcuts = []
+        self._shortcut_cmds = []
         handlers = self.keymap_handlers()
         used = {}
         for command, keys in self.effective_keymap().items():
@@ -2373,6 +2536,8 @@ class TVHeadendClient(QMainWindow):
                 shortcut.setContext(Qt.WindowShortcut)
                 shortcut.activated.connect(handler)
                 self._shortcuts.append(shortcut)
+                self._shortcut_cmds.append((shortcut, command))
+        self.apply_osd_input_state()
 
     def edit_keymap(self):
         dialog = KeyMapDialog(self.effective_keymap(), self.DEFAULT_KEYMAP, self)
