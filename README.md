@@ -78,3 +78,11 @@ pressing them (a remote or Flirc just sends key presses) and can import a
 remote profile: `Ctrl+D` info, `Ctrl+G`/`E` program guide, `K` channel list,
 `M` mute, volume keys, `+`/`-` channel up/down, `PgUp`/`PgDown` next/previous
 favourite, `0`-`9` direct channel entry, `Alt+Enter` fullscreen.
+
+With an OSD skin selected, `K` (channel list) and `Ctrl+O` (favourites) open a
+skinned list you navigate with the remote: `Up`/`Down`/`Left`/`Right`, `Enter`
+(tune) and `Backspace`/`Esc` (close). Without a skin `K` opens the plain
+channel dialog. More OSD windows (guide, timeline, ...) are work in progress.
+
+Unhandled errors and crashes are written to `tvhviewer.log` in the config
+directory - please attach it when reporting a problem.
