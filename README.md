@@ -81,8 +81,12 @@ favourite, `0`-`9` direct channel entry, `Alt+Enter` fullscreen.
 
 With an OSD skin selected, `K` (channel list) and `Ctrl+O` (favourites) open a
 skinned list you navigate with the remote: `Up`/`Down`/`Left`/`Right`, `Enter`
-(tune) and `Backspace`/`Esc` (close). Without a skin `K` opens the plain
-channel dialog. More OSD windows (guide, timeline, ...) are work in progress.
+(tune) and `Backspace`/`Esc` (close). Pressing the same key again closes the
+window, it also closes itself after 40 seconds without input, and channel
++/- and favourite +/- keep working while it is open. Settings → OSD Skin →
+*Transparency...* sets how see-through the OSD is. The OSD only shows while
+TVHviewer is the active program. Without a skin `K` opens a plain channel
+chooser. More OSD windows (guide, timeline, ...) are work in progress.
 
 Unhandled errors and crashes are written to `tvhviewer.log` in the config
 directory - please attach it when reporting a problem.
