@@ -355,14 +355,17 @@ def _draw_list(painter, skin, ctl, lst, focused):
             _draw_image(painter, skin, dict(focus_img), {}, QRectF(row_rect))
         elif selected and not focused:
             painter.fillRect(row_rect, QColor(255, 255, 255, 40))
-        # icon
+        # icon (e.g. channel logo)
         pix = skin.pixmap(item.get('icon', ''))
         iw, ih = _num(ctl, 'imagewidth', 0), _num(ctl, 'imageheight', 0)
-        if pix is not None and iw and ih:
-            painter.drawPixmap(QRectF(row_rect.x() + _num(ctl, 'iconoffsetx', 0),
-                                      row_rect.y() + _num(ctl, 'iconoffsety', 0), iw, ih),
-                               pix, QRectF(pix.rect()))
-        # up to three text columns
+        icon_shift = 0.0
+        if iw and ih and (pix is not None or item.get('reserve_icon')):
+            icon_x = _num(ctl, 'iconoffsetx', 0)
+            if pix is not None:
+                painter.drawPixmap(QRectF(row_rect.x() + icon_x, row_rect.y() + _num(ctl, 'iconoffsety', 0), iw, ih),
+                                   pix, QRectF(pix.rect()))
+            icon_shift = icon_x + iw   # the first text column starts behind the icon / its reserved space
+        # up to three text columns: 1 = title/name, 2 = time/number, 3 = description
         for n, suffix in ((1, ''), (2, '2'), (3, '3')):
             text = item.get('label%d' % n, '')
             if not text or ctl.get('textvisible%d' % n, 'true').lower() == 'false':
@@ -370,8 +373,12 @@ def _draw_list(painter, skin, ctl, lst, focused):
             font = skin.qfont(ctl.get('font' + suffix))
             painter.setFont(font)
             ox = _num(ctl, 'textoffsetx' + suffix, _num(ctl, 'textoffsetx', 0) if n == 1 else 0)
-            has_oy = ('textoffsety' + suffix) in ctl
-            oy = _num(ctl, 'textoffsety' + suffix, 0)
+            if n == 1:
+                ox += icon_shift
+            oy_key = 'textoffsety' + suffix if ('textoffsety' + suffix) in ctl else 'textoffsety'
+            single_line = item_h <= font.pixelSize() * 2.2
+            has_oy = (oy_key in ctl) and not (single_line and n < 3)
+            oy = _num(ctl, oy_key, 0)
             color = ctl.get(('selectedcolor' if highlighted else 'textcolor') + suffix) or \
                 ctl.get('selectedcolor' if highlighted else 'textcolor') or ('FF000000' if highlighted else 'FFFFFFFF')
             painter.setPen(parse_color(color))
@@ -379,7 +386,11 @@ def _draw_list(painter, skin, ctl, lst, focused):
                                row_rect.width() - ox - 6, (item_h - oy) if has_oy else item_h)
             vflag = Qt.AlignTop if has_oy else Qt.AlignVCenter
             hflag = Qt.AlignRight if (n == 1 and ctl.get('align1', '').lower() == 'right') else Qt.AlignLeft
-            painter.drawText(text_rect, int(hflag | vflag), text)
+            flags = int(hflag | vflag) | (int(Qt.TextWordWrap) if n == 3 else 0)
+            painter.save()
+            painter.setClipRect(text_rect.intersected(row_rect))
+            painter.drawText(text_rect, flags, text)
+            painter.restore()
     painter.restore()
 
 
@@ -491,14 +502,21 @@ class OSDOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.skin = None
         self.screen = None  # OSDScreen drawn on the 'screen' layer
+        self.opacity = 1.0  # user setting: how see-through the whole OSD is
         self.values = {}
         self.layers = {}  # key -> deadline (time.monotonic()), None = stay
         from PyQt5.QtCore import QTimer
         self._timer = QTimer(self)
         self._timer.setInterval(200)
         self._timer.timeout.connect(self._expire)
+        # Never float over other programs: hide while our app isn't the active one
+        from PyQt5.QtGui import QGuiApplication
+        QGuiApplication.instance().applicationStateChanged.connect(self._app_state_changed)
 
     def show_layer(self, skin, key, values, area_rect, timeout_ms=4000):
+        from PyQt5.QtGui import QGuiApplication
+        if QGuiApplication.applicationState() != Qt.ApplicationActive:
+            return  # don't pop up over other programs
         """area_rect: QRect in global screen coordinates (the video area)"""
         import time
         self.skin, self.values = skin, values
@@ -508,6 +526,17 @@ class OSDOverlay(QWidget):
         self.raise_()
         self.update()
         self._timer.start()
+
+    def _app_state_changed(self, state):
+        if state != Qt.ApplicationActive:
+            self.hide()
+        elif self.layers:
+            self.show()
+            self.update()
+
+    def set_opacity(self, value):
+        self.opacity = max(0.1, min(1.0, float(value)))
+        self.update()
 
     def hide_layer(self, key):
         self.layers.pop(key, None)
@@ -532,6 +561,7 @@ class OSDOverlay(QWidget):
         if self.skin is None:
             return
         painter = QPainter(self)
+        painter.setOpacity(self.opacity)
         for key in list(self.layers):
             if key == 'screen':
                 if self.screen is not None:
