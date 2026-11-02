@@ -1169,6 +1169,60 @@ def parse_remote_file(path):
     return result
 
 
+class ChannelPickerDialog(QDialog):
+    """Plain channel chooser, built fresh every time it is opened: type to
+    filter, Up/Down to move, Enter to tune. (The old persistent channel dialog
+    segfaulted inside show() on some Linux Qt builds.)"""
+
+    def __init__(self, channels, current_uuid, on_pick, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Channels")
+        self.resize(420, 640)
+        self._channels = channels
+        self._on_pick = on_pick
+        layout = QVBoxLayout(self)
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText("Search...")
+        layout.addWidget(self.filter)
+        self.list = QListWidget()
+        layout.addWidget(self.list)
+        self._current_uuid = current_uuid
+        self._fill('')
+        self.filter.textChanged.connect(self._fill)
+        self.filter.returnPressed.connect(lambda: self._pick(self.list.currentItem()))
+        self.list.itemActivated.connect(self._pick)
+        self.filter.setFocus()
+
+    def _fill(self, text):
+        needle = text.strip().lower()
+        self.list.clear()
+        select_row = 0
+        for channel in self._channels:
+            label = f"{channel.get('number') or ''}  {channel.get('name', '')}".strip()
+            if needle and needle not in label.lower():
+                continue
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, channel)
+            self.list.addItem(item)
+            if not needle and channel.get('uuid') == self._current_uuid:
+                select_row = self.list.count() - 1
+        if self.list.count():
+            self.list.setCurrentRow(select_row)
+
+    def _pick(self, item):
+        if item is None:
+            return
+        channel = item.data(Qt.UserRole)
+        self.accept()
+        self._on_pick(channel)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown):
+            self.list.keyPressEvent(event)  # arrows work from inside the search box
+        else:
+            super().keyPressEvent(event)
+
+
 class KeyMapDialog(QDialog):
     """Assign keys by pressing them (what a remote / Flirc sends is just keys)"""
 
@@ -1352,6 +1406,10 @@ class TVHeadendClient(QMainWindow):
         self._digit_timer = QTimer(self)
         self._digit_timer.setSingleShot(True)
         self._digit_timer.timeout.connect(self._tune_number)
+        self._osd_idle = QTimer(self)
+        self._osd_idle.setSingleShot(True)
+        self._osd_idle.timeout.connect(self.close_osd_window)
+        self._osd_mode = None
 
         # Kodi hand-off state (see launch_kodi)
         self.kodi_active = False
@@ -2256,6 +2314,9 @@ class TVHeadendClient(QMainWindow):
             self.osd_menu.addAction(empty)
 
         self.osd_menu.addSeparator()
+        opacity = QAction("Transparency...", self)
+        opacity.triggered.connect(self.edit_osd_opacity)
+        self.osd_menu.addAction(opacity)
         open_folder = QAction("Open OSDskins Folder", self)
         open_folder.triggered.connect(self.open_osd_folder)
         self.osd_menu.addAction(open_folder)
@@ -2271,6 +2332,54 @@ class TVHeadendClient(QMainWindow):
             self.close_osd_window()
             if self.osd_overlay is not None:
                 self.osd_overlay.hide()
+
+    def edit_osd_opacity(self):
+        """Slider for how see-through the OSD is (live preview)"""
+        original = int(self.config.get('osd_opacity', 100))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("OSD Transparency")
+        layout = QVBoxLayout(dialog)
+        label = QLabel()
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(20, 100)
+        layout.addWidget(label)
+        layout.addWidget(slider)
+        box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.accepted.connect(dialog.accept)
+        box.rejected.connect(dialog.reject)
+        layout.addWidget(box)
+
+        def apply(value):
+            label.setText(f"Opacity: {value} %   (100 % = fully opaque)")
+            self.config['osd_opacity'] = value
+            if self.osd_overlay is not None:
+                self.osd_overlay.set_opacity(value / 100.0)
+            self.show_osd('miniepg', 60000)  # live preview
+        slider.valueChanged.connect(apply)
+        slider.setValue(original)
+        apply(original)
+        if dialog.exec_() == QDialog.Accepted:
+            self.save_config()
+        else:
+            self.config['osd_opacity'] = original
+            if self.osd_overlay is not None:
+                self.osd_overlay.set_opacity(original / 100.0)
+        if self.osd_overlay is not None:
+            self.osd_overlay.hide_layer('miniepg')
+
+    def _reposition_osd(self):
+        """Keep the OSD on the video when the window is moved/resized"""
+        overlay = getattr(self, 'osd_overlay', None)
+        if overlay is not None and overlay.isVisible() and hasattr(self, 'video_frame'):
+            overlay.setGeometry(QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size()))
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._reposition_osd()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_osd()
 
     def open_osd_folder(self):
         os.makedirs(self.osd_skins_dir, exist_ok=True)
@@ -2358,6 +2467,7 @@ class TVHeadendClient(QMainWindow):
         try:
             if self.osd_overlay is None:
                 self.osd_overlay = osdskin.OSDOverlay(self)
+            self.osd_overlay.set_opacity(self.config.get('osd_opacity', 100) / 100.0)
             area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
             self.osd_overlay.show_layer(self.osd_skin, key, self.osd_values(), area, timeout_ms)
         except Exception as e:
@@ -2365,7 +2475,10 @@ class TVHeadendClient(QMainWindow):
 
     OSD_NAV_COMMANDS = ('OSD Up', 'OSD Down', 'OSD Left', 'OSD Right', 'OSD OK', 'OSD Back')
     # keys that keep working while an OSD window has the remote
-    OSD_PASSTHROUGH = ('Mute', 'Volume Up', 'Volume Down')
+    OSD_PASSTHROUGH = ('Mute', 'Volume Up', 'Volume Down',
+                       'Channel Plus', 'Channel Minus', 'Favourite Plus', 'Favourite Minus',
+                       'Channel List', 'OSD Channel List', 'OSD Favourites List')   # these toggle/switch the open window
+    OSD_IDLE_MS = 40000   # an open OSD window closes itself after this long without input
 
     def apply_osd_input_state(self):
         """While an OSD window is open the remote navigates it: the OSD keys
@@ -2388,6 +2501,11 @@ class TVHeadendClient(QMainWindow):
         if osdskin is None or self.osd_skin is None or self.osd_skin.window(key) is None:
             self.statusbar.showMessage("Select an OSD skin first (Settings -> OSD Skin)")
             return
+        mode = (key, bool(favourites))
+        if self.osd_screen is not None and self._osd_mode == mode:
+            self.close_osd_window()      # same key again = toggle off
+            return
+        self._osd_mode = mode
         if key == 'channels':
             channels = self.channels
             if favourites:
@@ -2399,8 +2517,8 @@ class TVHeadendClient(QMainWindow):
                 return
             screen = osdskin.OSDScreen(self.osd_skin, 'channels', on_ok=self._osd_ok, on_change=self._osd_changed)
             current = (self.current_channel_data or {}).get('uuid')
-            items = [{'label1': f"{c.get('number') or ''}  {c.get('name', '')}".strip(), 'icon': '', 'data': c}
-                     for c in channels]
+            items = [{'label1': f"{c.get('number') or ''}  {c.get('name', '')}".strip(), 'icon': '',
+                      'reserve_icon': True, 'data': c} for c in channels]
             start = next((i for i, c in enumerate(channels) if c.get('uuid') == current), 0)
             screen.lists['2'].set_items(items, start)
             self.osd_screen = screen
@@ -2409,10 +2527,19 @@ class TVHeadendClient(QMainWindow):
             self.osd_overlay = osdskin.OSDOverlay(self)
         self.osd_overlay.screen = self.osd_screen
         area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+        self.osd_overlay.set_opacity(self.config.get('osd_opacity', 100) / 100.0)
         self.osd_overlay.show_layer(self.osd_skin, 'screen', self.osd_values(), area, None)
         self.apply_osd_input_state()
+        self._touch_osd()
+
+    def _touch_osd(self):
+        """Any input restarts the idle countdown of an open OSD window"""
+        if self.osd_screen is not None:
+            self._osd_idle.start(self.OSD_IDLE_MS)
 
     def close_osd_window(self):
+        self._osd_idle.stop()
+        self._osd_mode = None
         self.osd_screen = None
         if self.osd_overlay is not None:
             self.osd_overlay.screen = None
@@ -2426,6 +2553,7 @@ class TVHeadendClient(QMainWindow):
             self.close_osd_window()
         else:
             self.osd_screen.handle(action)
+            self._touch_osd()
             if self.osd_overlay is not None:
                 self.osd_overlay.update()
 
@@ -2444,10 +2572,27 @@ class TVHeadendClient(QMainWindow):
             start = datetime.fromtimestamp(ev['start']).strftime('%H:%M')
             stop = datetime.fromtimestamp(ev['stop']).strftime('%H:%M')
             desc = _epg_text(ev.get('description'), _epg_text(ev.get('summary')))
-            items.append({'label1': _epg_text(ev.get('title'), 'No title'),
-                          'label3': f"{start} - {stop}  {desc}".strip(), 'icon': '', 'data': ev})
+            items.append({'label1': _epg_text(ev.get('title'), 'No title'), 'label2': start,
+                          'label3': desc, 'icon': '', 'data': ev})
         screen.lists['100'].set_items(items, 0)
         screen.values = {'channelname': channel.get('name', ''), 'channelnr': str(channel.get('number') or '')}
+
+    def _osd_after_channel_change(self):
+        """+/-, PgUp/PgDn work while the list is open: follow the new channel"""
+        screen = self.osd_screen
+        if screen is None or '2' not in screen.lists:
+            return
+        current = (self.current_channel_data or {}).get('uuid')
+        lst = screen.lists['2']
+        for index, item in enumerate(lst.items):
+            if item['data'].get('uuid') == current:
+                lst.selected = index
+                lst._scroll_into_view()
+                break
+        self._osd_fill_events()
+        self._touch_osd()
+        if self.osd_overlay is not None:
+            self.osd_overlay.update()
 
     def _osd_changed(self, list_id, item):
         if list_id == '2':
@@ -2471,6 +2616,7 @@ class TVHeadendClient(QMainWindow):
         if index is None:
             index = -1 if delta > 0 else 0
         self.play_channel_by_data(self.channels[(index + delta) % len(self.channels)])
+        self._osd_after_channel_change()
 
     def keymap_handlers(self):
         handlers = {
@@ -2562,6 +2708,7 @@ class TVHeadendClient(QMainWindow):
         if index is None:
             index = -1 if delta > 0 else 0
         self.play_channel_by_data(favourites[(index + delta) % len(favourites)])
+        self._osd_after_channel_change()
 
     def osd_digit(self, digit):
         """Direct channel entry: digits collect for 1.5 s, then tune"""
@@ -3833,9 +3980,14 @@ class TVHeadendClient(QMainWindow):
 
     def show_channel_dialog(self):
         """Show the 'All Channels' window (channel list + server picker)"""
-        self.channel_dialog.show()
-        self.channel_dialog.raise_()
-        self.channel_dialog.activateWindow()
+        if not self.channels:
+            self.statusbar.showMessage("No channels loaded yet")
+            return
+        picker = ChannelPickerDialog(self.channels, (self.current_channel_data or {}).get('uuid'),
+                                     self.play_channel_by_data, self)
+        picker.setAttribute(Qt.WA_DeleteOnClose)
+        self._channel_picker = picker
+        picker.show()
 
     def rebuild_server_menu(self):
         """Rebuild the Settings -> Active Server checkable list"""
@@ -4172,7 +4324,7 @@ class TVHeadendClient(QMainWindow):
                 if hasattr(self, 'favorites_menu'):
                     self.rebuild_favorites_menu()
                 # give VLC a moment to report codec/resolution before showing the info OSD
-                QTimer.singleShot(1500, lambda: self.show_osd('miniepg', 6000))
+                QTimer.singleShot(1500, lambda: self.osd_screen is None and self.show_osd('miniepg', 6000))
             else:
                 print(f"Debug: Channel not found: {channel_data['name']}")
                 self.statusbar.showMessage("Channel not found")
