@@ -5,7 +5,7 @@ More modern desktop client for [TVHeadend](https://tvheadend.org/). Watch and re
 **TVHviewer is a fork of [TVHplayer](https://github.com/mfat/tvhplayer) by mFat.**
 See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in this fork.
 
-![Screenshot](Screenshots/Screenshot_6.png)
+![Screenshot](Screenshots/Screenshot_7.png)
 
 ## Features
 
