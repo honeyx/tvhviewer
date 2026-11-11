@@ -17,11 +17,8 @@ jobs:
     strategy:
       fail-fast: false  # one platform failing shouldn't cancel the others
       matrix:
-        os: [macos-14, windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest]
         include:
-          - os: macos-14
-            arch: arm64  # macOS ARM64 (M1/M2)
-            artifact_name: tvhviewer-macos-arm64
           - os: windows-latest
             arch: amd64
             artifact_name: tvhviewer-windows
