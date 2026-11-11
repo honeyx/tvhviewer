@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox,  # Added QGroupBox here
     QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction, QKeySequenceEdit
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject, QPoint, QUrl
+from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject, QPoint, QUrl, QLocale
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics, QDesktopServices
 
 # Optional OSD skin support (separate module; the app works without it)
@@ -1169,6 +1169,14 @@ def parse_remote_file(path):
     return result
 
 
+MENU_TEXT_DE = {'Program': 'Sender-EPG', 'Channels': 'Senderliste', 'CAM Menu': 'CAM Menü',
+                'Recordings': 'Aufnahmen', 'Timer': 'Timer', 'Clock': 'Uhr', 'TimeLine': 'Timeline',
+                "What's now": 'Jetzt läuft', 'theMovies': 'Videos', 'Kodi': 'Kodi'}
+MENU_TEXT_EN = {'Program': 'Channel EPG', 'Channels': 'Channels', 'CAM Menu': 'CAM Menu',
+                'Recordings': 'Recordings', 'Timer': 'Timer', 'Clock': 'Clock', 'TimeLine': 'Timeline',
+                "What's now": "What's on now", 'theMovies': 'Videos', 'Kodi': 'Kodi'}
+
+
 class ChannelPickerDialog(QDialog):
     """Plain channel chooser, built fresh every time it is opened: type to
     filter, Up/Down to move, Enter to tune. (The old persistent channel dialog
@@ -2223,11 +2231,12 @@ class TVHeadendClient(QMainWindow):
     # file can be imported. Several keys per command: comma separated.
     DEFAULT_KEYMAP = dict({
         'OSD Menu': 'Ctrl+D',
+        'OSD Info': 'I',
         'OSD Clock': '',
         'OSD EPG': 'Ctrl+G',
         'EPG Window': 'E',
         'Channel List': 'K',
-        'OSD Channel List': '',
+        'OSD Channel List': 'Ctrl+K',
         'OSD Favourites List': 'Ctrl+O',
         'OSD Up': 'Up',
         'OSD Down': 'Down',
@@ -2477,7 +2486,7 @@ class TVHeadendClient(QMainWindow):
     # keys that keep working while an OSD window has the remote
     OSD_PASSTHROUGH = ('Mute', 'Volume Up', 'Volume Down',
                        'Channel Plus', 'Channel Minus', 'Favourite Plus', 'Favourite Minus',
-                       'Channel List', 'OSD Channel List', 'OSD Favourites List')   # these toggle/switch the open window
+                       'Channel List', 'OSD Channel List', 'OSD Favourites List', 'OSD Menu')   # these toggle/switch the open window
     OSD_IDLE_MS = 40000   # an open OSD window closes itself after this long without input
 
     def apply_osd_input_state(self):
@@ -2516,6 +2525,8 @@ class TVHeadendClient(QMainWindow):
                 self.statusbar.showMessage("No channels to show")
                 return
             screen = osdskin.OSDScreen(self.osd_skin, 'channels', on_ok=self._osd_ok, on_change=self._osd_changed)
+            screen.group = 'fav' if favourites else 'tv'
+            osdskin.set_language('de' if QLocale.system().language() == QLocale.German else 'en')
             current = (self.current_channel_data or {}).get('uuid')
             items = [{'label1': f"{c.get('number') or ''}  {c.get('name', '')}".strip(), 'icon': '',
                       'reserve_icon': True, 'data': c} for c in channels]
@@ -2523,6 +2534,13 @@ class TVHeadendClient(QMainWindow):
             screen.lists['2'].set_items(items, start)
             self.osd_screen = screen
             self._osd_fill_events()
+        elif key == 'home':
+            entries = osdskin.load_menu_entries(os.path.join(self.osd_skins_dir, 'windowdef.xml'))
+            german = QLocale.system().language() == QLocale.German
+            names = MENU_TEXT_DE if german else MENU_TEXT_EN
+            for entry in entries:
+                entry['display'] = names.get(entry['text'], entry['text'])
+            self.osd_screen = osdskin.OSDMenuScreen(self.osd_skin, entries, on_ok=self._osd_menu_ok)
         if self.osd_overlay is None:
             self.osd_overlay = osdskin.OSDOverlay(self)
         self.osd_overlay.screen = self.osd_screen
@@ -2594,6 +2612,29 @@ class TVHeadendClient(QMainWindow):
         if self.osd_overlay is not None:
             self.osd_overlay.update()
 
+    def _osd_notice(self, text, ms=3000):
+        """Small message on the video (the status bar is hidden in fullscreen)"""
+        if self.osd_skin is None or osdskin is None:
+            return
+        if self.osd_overlay is None:
+            self.osd_overlay = osdskin.OSDOverlay(self)
+        area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+        self.osd_overlay.show_notice(self.osd_skin, text, area, ms)
+
+    def _osd_menu_ok(self, entry):
+        """OK on a home-menu entry: run what we support, say so for the rest"""
+        entry_id, application = entry.get('id'), entry.get('application')
+        self.close_osd_window()
+        if application:                       # external program entry (Kodi)
+            self._kodi_path_hint = application if os.path.exists(application) else ''
+            self.launch_kodi()
+        elif entry_id == '1':                 # Channel Window -> skinned channel list
+            QTimer.singleShot(0, lambda: self.open_osd_window('channels'))
+        elif entry_id == '102':               # Clock
+            self.show_osd('clock', 5000)
+        else:
+            self._osd_notice(f"{entry.get('display', entry.get('text', ''))}: not available yet")
+
     def _osd_changed(self, list_id, item):
         if list_id == '2':
             self._osd_fill_events()
@@ -2603,6 +2644,14 @@ class TVHeadendClient(QMainWindow):
             channel = item['data']
             self.close_osd_window()
             self.play_channel_by_data(channel)
+
+    def osd_epg_not_ready(self):
+        """Ctrl+G ('OSD EPG'): with a skin on, say it's not there yet (E still opens the plain guide);
+        without a skin keep opening the plain guide."""
+        if self.osd_skin is not None:
+            self._osd_notice("OSD EPG: not available yet (E opens the program guide)")
+        else:
+            self.show_epg_grid()
 
     def change_volume(self, delta):
         self.volume_slider.setValue(max(0, min(100, self.volume_slider.value() + delta)))
@@ -2620,11 +2669,12 @@ class TVHeadendClient(QMainWindow):
 
     def keymap_handlers(self):
         handlers = {
-            'OSD Menu': lambda: self.show_osd('miniepg', 8000),
+            'OSD Menu': lambda: self.open_osd_window('home'),
+            'OSD Info': lambda: self.show_osd('miniepg', 8000),
             'OSD Clock': lambda: self.show_osd('clock', 4000),
-            'OSD EPG': self.show_epg_grid,  # the skin's own guide window isn't implemented yet
+            'OSD EPG': self.osd_epg_not_ready,   # the skinned EPG window isn't built yet
             'EPG Window': self.show_epg_grid,
-            'Channel List': self.open_channel_list,
+            'Channel List': self.show_channel_dialog,   # always the plain chooser; the OSD list is 'OSD Channel List'
             'OSD Channel List': lambda: self.open_osd_window('channels'),
             'OSD Favourites List': lambda: self.open_osd_window('channels', favourites=True),
             'OSD Up': lambda: self.osd_action('up'),
@@ -2651,6 +2701,13 @@ class TVHeadendClient(QMainWindow):
     def effective_keymap(self):
         keymap = dict(self.DEFAULT_KEYMAP)
         saved = self.config.get('keymap', {})
+        if isinstance(saved, dict) and self.config.get('keymap_version', 1) < 2:
+            # v2: 'OSD Channel List' = Ctrl+K and a separate 'OSD Info' key; older saves had them empty
+            for command in ('OSD Channel List', 'OSD Info'):
+                saved.pop(command, None)
+            self.config['keymap_version'] = 2
+            self.config['keymap'] = saved
+            self.save_config()
         if isinstance(saved, dict):
             keymap.update({k: v for k, v in saved.items() if k in keymap})
         return keymap
@@ -2803,7 +2860,7 @@ class TVHeadendClient(QMainWindow):
             return
 
         # Find a usable command, asking for the path if needed
-        path = self.config.get('kodi_path', '').strip() or self.default_kodi_path()
+        path = self.config.get('kodi_path', '').strip() or getattr(self, '_kodi_path_hint', '') or self.default_kodi_path()
         while True:
             try:
                 cmd = self.build_kodi_command(path)
