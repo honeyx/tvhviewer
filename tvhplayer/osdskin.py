@@ -22,9 +22,10 @@ WINDOW_FILES = {
     'clock': 'myClock.xml',
     'miniepg': 'myMiniEPG.xml',
     'channels': 'mychannels.xml',
+    'home': 'home.xml',
 }
 
-_TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*')
+_TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*(?:[+-]\d)?')
 _TIME_TOKEN = re.compile(r'#Time\.[^\s#]+', re.I)
 _TIME_PARTS = re.compile(r'yyyy|mmmm|dddd|hh|nn|ss|dd|mm')
 _TIME_MAP = {'yyyy': '%Y', 'mmmm': '%B', 'dddd': '%A', 'hh': '%H',
@@ -221,6 +222,30 @@ def _hidden(ctl, values):
     return flag is not None and not values.get(flag)
 
 
+# Skins label some controls with numbers: ids into the host program's language
+# table. These are the ones used by the colour-button legend of the list windows.
+UI_STRINGS = {
+    'de': {'901': 'TV / Radio / Fav', '902': 'EPG anzeigen', '903': 'Favoriten-Editor', '904': 'Kontext',
+           },
+    'en': {'901': 'TV / Radio / Fav', '902': 'Show EPG', '903': 'Favourites editor', '904': 'Context',
+           },
+}
+_language = 'en'
+
+
+def set_language(code):
+    global _language
+    _language = code if code in UI_STRINGS else 'en'
+
+
+def ui_string(label):
+    """A button label: numbers are looked up in the string table, text is kept"""
+    label = (label or '').strip()
+    if label.isdigit():
+        return UI_STRINGS[_language].get(label, '')
+    return label
+
+
 def _percent(value):
     try:
         return max(0.0, min(100.0, float(str(value).replace('%', '').strip())))
@@ -264,7 +289,59 @@ def _draw_label(painter, skin, ctl, values, rect):
         painter.setPen(QColor(0, 0, 0, 200))
         painter.drawText(rect.translated(_num(ctl, 'shadowx', 1), _num(ctl, 'shadowy', 1)), flags, text)
     painter.setPen(parse_color(ctl.get('textcolor'), 'FFFFFFFF'))
-    painter.drawText(rect, flags, text)
+    family = skin.fonts.get((ctl.get('font') or 'defaultfont').lower(), ('',))[0].lower()
+    if 'mirror' in family:  # reflection under a text: same text, flipped
+        painter.save()
+        painter.translate(0, rect.center().y())
+        painter.scale(1, -1)
+        painter.translate(0, -rect.center().y())
+        painter.drawText(rect, flags, text)
+        painter.restore()
+    else:
+        painter.drawText(rect, flags, text)
+
+
+def _draw_button(painter, skin, ctl, values, rect):
+    """A skin Button in its unfocused look: its image, plus its label"""
+    image = _sub(ctl, 'imgnofocus')
+    if image:
+        _draw_image(painter, skin, dict(image), values, QRectF(rect))
+    label = _sub(ctl, 'buttonlabel')
+    # Only labels that are language-table ids are shown; plain-text captions
+    # ('Previous Group', 'Next Group', ...) are just names for the skin author.
+    if label and (label.get('label') or '').strip().isdigit():
+        text = ui_string(label.get('label'))
+        if text:
+            lab = dict(label)
+            lab['label'] = text
+            lab['textcolor'] = lab.get('textcolor') or lab.get('disabledcolor') or 'FF000000'
+            ox = _num(ctl, 'textoffsetx', 0)
+            lab_rect = QRectF(rect.x() + ox, rect.y(), _num(label, 'width', rect.width() - ox),
+                              _num(label, 'height', rect.height()))
+            _draw_label(painter, skin, lab, values, lab_rect)
+
+
+def _draw_group_banner(painter, skin, ctl, screen, values, window):
+    """Bottom-right group logo (TV / Radio / Favourites); the image carries the title text"""
+    wanted = {'tv': '3', 'radio': '4', 'fav': '5'}.get(getattr(screen, 'group', 'tv'), '3')
+    if ctl.get('id') != wanted:
+        return
+    rect = _rect(ctl)
+    if rect.width() < 400:   # small toggles are tab buttons (older skins), not a group logo
+        return
+    image = _sub(ctl, 'imgfocus')
+    if image:
+        _draw_image(painter, skin, dict(image), values, QRectF(rect))
+
+
+def _draw_menu_label(painter, skin, ctl, values, rect):
+    """Name of the focused menu entry, centred, in the skin's 'selected' colour"""
+    text = values.get('menufocustext', '')
+    if not text:
+        return
+    painter.setFont(skin.qfont(ctl.get('font') or ctl.get('font2')))
+    painter.setPen(parse_color(ctl.get('selectedcolor') or ctl.get('textcolor'), 'FF45BDFC'))
+    painter.drawText(rect, int(Qt.AlignHCenter | Qt.AlignVCenter), text)
 
 
 def _draw_progress(painter, skin, ctl, values, rect):
@@ -314,6 +391,12 @@ def render(painter, skin, key, values, width, height, screen=None):
             _draw_label(painter, skin, ctl, values, rect)
         elif ctype in ('progress', 'tickprogress'):
             _draw_progress(painter, skin, ctl, values, rect)
+        elif ctype == 'button' and screen is not None and getattr(screen, 'key', '') != 'home':
+            _draw_button(painter, skin, ctl, values, rect)
+        elif ctype == 'togglebutton' and screen is not None and getattr(screen, 'key', '') == 'channels':
+            _draw_group_banner(painter, skin, ctl, screen, values, window)
+        elif ctype == 'menu' and screen is not None and getattr(screen, 'key', '') == 'home':
+            _draw_menu_label(painter, skin, ctl, screen.values, rect)
         elif ctype == 'listcontrol' and screen is not None and ctl.get('id') in screen.lists:
             _draw_list(painter, skin, ctl, screen.lists[ctl['id']], screen.focus == ctl['id'])
         # buttons / spincontrols / videowindow are interactive or HTPC-only: skipped
@@ -438,6 +521,7 @@ class OSDScreen:
 
     def __init__(self, skin, key, on_ok=None, on_change=None):
         self.skin, self.key = skin, key
+        self.group = 'tv'   # 'tv' / 'fav': which group logo + title the window shows
         self.on_ok, self.on_change = on_ok, on_change
         self.window = skin.window(key)
         self.lists = {}
@@ -476,6 +560,78 @@ class OSDScreen:
         return False
 
 
+DEFAULT_MENU = [  # the usual HTPC home entries, used when no windowdef.xml is provided
+    ('2', 'Channel EPG', 'Program', 'home_epg.png', ''),
+    ('1', 'Channel Window', 'Channels', 'home_channels.png', ''),
+    ('15', 'Cam Menu Window', 'CAM Menu', 'home_cam.png', ''),
+    ('603', 'Recordings Window', 'Recordings', 'home_recordings.png', ''),
+    ('4', 'Timer Window', 'Timer', 'home_timer.png', ''),
+    ('102', 'Clock Button', 'Clock', 'home_clock.png', ''),
+    ('600', 'Timeline Window', 'TimeLine', 'home_timeline.png', ''),
+    ('3', 'EPG Now Window', "What's now", 'home_now.png', ''),
+    ('6', 'Movies Window', 'theMovies', 'home_videos.png', ''),
+    ('-3', 'Kodi', 'Kodi', 'home_kodi.png', 'kodi'),
+]
+
+
+def load_menu_entries(windowdef_path=None):
+    """Home-menu entries (enabled, parent 0) from a windowdef.xml, in file order;
+    falls back to a built-in list. Each entry: id, name, text, image, application."""
+    entries = []
+    if windowdef_path and os.path.isfile(windowdef_path):
+        try:
+            for win in ET.parse(windowdef_path).getroot().iter('Window'):
+                if win.get('Parent') != '0' or (win.findtext('enabled') or '1').strip() == '0':
+                    continue
+                entries.append({'id': win.get('ID') or '', 'name': win.get('Name') or '',
+                                'text': win.get('Text') or win.get('Name') or '',
+                                'image': (win.findtext('Image') or '').strip(),
+                                'application': (win.findtext('Application') or '').strip()})
+        except ET.ParseError:
+            entries = []
+    if not entries:
+        entries = [{'id': i, 'name': n, 'text': t, 'image': img, 'application': app}
+                   for i, n, t, img, app in DEFAULT_MENU]
+    return entries
+
+
+class OSDMenuScreen:
+    """The home menu: a ring of entries, the focused one in the middle and two
+    neighbours on each side. The skin draws it via #menufocusimage(+/-N) etc.
+    In the skin '+N' is the slot on the left, i.e. the entry BEFORE the focus."""
+
+    def __init__(self, skin, items, on_ok=None, on_change=None):
+        self.skin, self.key = skin, 'home'
+        self.items, self.index = items, 0
+        self.on_ok, self.on_change = on_ok, on_change
+        self.lists, self.focus, self.values = {}, None, {}
+        self._update()
+
+    def _item(self, offset):
+        return self.items[(self.index + offset) % len(self.items)]
+
+    def _update(self):
+        values = {'currentwindow': 'Home Window'}
+        for offset in (-2, -1, 0, 1, 2):
+            suffix = '' if offset == 0 else '%+d' % offset
+            item = self._item(-offset)
+            values['menufocusimage' + suffix] = item.get('image', '')
+            values['menufocustext' + suffix] = item.get('display', item.get('text', ''))
+        self.values = values
+
+    def handle(self, action):
+        if action in ('left', 'right'):
+            self.index = (self.index + (-1 if action == 'left' else 1)) % len(self.items)
+            self._update()
+            if self.on_change:
+                self.on_change(self.items[self.index])
+            return True
+        if action == 'ok' and self.on_ok:
+            self.on_ok(self.items[self.index])
+            return True
+        return action in ('up', 'down')
+
+
 def find_skins(root_folder):
     """{display name: folder} for every valid skin below root_folder"""
     skins = {}
@@ -503,6 +659,7 @@ class OSDOverlay(QWidget):
         self.skin = None
         self.screen = None  # OSDScreen drawn on the 'screen' layer
         self.opacity = 1.0  # user setting: how see-through the whole OSD is
+        self.notice_text = ''
         self.values = {}
         self.layers = {}  # key -> deadline (time.monotonic()), None = stay
         from PyQt5.QtCore import QTimer
@@ -538,6 +695,10 @@ class OSDOverlay(QWidget):
         self.opacity = max(0.1, min(1.0, float(value)))
         self.update()
 
+    def show_notice(self, skin, text, area_rect, timeout_ms=3000):
+        self.notice_text = text
+        self.show_layer(skin, 'notice', self.values, area_rect, timeout_ms)
+
     def hide_layer(self, key):
         self.layers.pop(key, None)
         if not self.layers:
@@ -557,13 +718,30 @@ class OSDOverlay(QWidget):
         else:
             self.update()
 
+    def _paint_notice(self, painter):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = QFont()
+        font.setPixelSize(max(14, int(self.height() * 0.035)))
+        painter.setFont(font)
+        width = painter.fontMetrics().horizontalAdvance(self.notice_text) + 60
+        rect = QRectF((self.width() - width) / 2, self.height() * 0.82, width, font.pixelSize() * 2.2)
+        painter.setBrush(QColor(20, 20, 20, 215))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(rect, 10, 10)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(rect, Qt.AlignCenter, self.notice_text)
+        painter.restore()
+
     def paintEvent(self, event):
         if self.skin is None:
             return
         painter = QPainter(self)
         painter.setOpacity(self.opacity)
         for key in list(self.layers):
-            if key == 'screen':
+            if key == 'notice':
+                self._paint_notice(painter)
+            elif key == 'screen':
                 if self.screen is not None:
                     render(painter, self.skin, self.screen.key, {**self.values, **self.screen.values},
                            self.width(), self.height(), self.screen)
