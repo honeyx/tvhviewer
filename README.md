@@ -86,7 +86,12 @@ window, it also closes itself after 40 seconds without input, and channel
 +/- and favourite +/- keep working while it is open. Settings → OSD Skin →
 *Transparency...* sets how see-through the OSD is. The OSD only shows while
 TVHviewer is the active program. Without a skin `K` opens a plain channel
-chooser. More OSD windows (guide, timeline, ...) are work in progress.
+chooser. `Ctrl+K` opens the skinned channel list directly, `I` shows the info
+bar, and `Ctrl+D` opens the OSD menu: a ring of entries (channel list, clock,
+Kodi, ...) taken from a `windowdef.xml` in the OSDskins folder (a built-in list
+is used when there is none); `Left`/`Right` choose, `Enter` runs, `Backspace`
+closes. Entries for windows that are not built yet say so. More OSD windows
+(guide, timeline, ...) are work in progress.
 
 Unhandled errors and crashes are written to `tvhviewer.log` in the config
 directory - please attach it when reporting a problem.
