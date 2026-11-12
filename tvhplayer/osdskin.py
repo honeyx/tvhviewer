@@ -17,12 +17,24 @@ from PyQt5.QtGui import QColor, QPainter, QPixmap, QFont
 from PyQt5.QtWidgets import QWidget
 
 # Which skin file draws which OSD (by file name, as found in the skin folder)
-WINDOW_FILES = {
-    'volume': 'myVolume.xml',
-    'clock': 'myClock.xml',
-    'miniepg': 'myMiniEPG.xml',
-    'channels': 'mychannels.xml',
-    'home': 'home.xml',
+WINDOW_FILES = {   # every entry: candidate file names, first existing one wins (case-insensitive)
+    'volume': ('myVolume.xml',),
+    'clock': ('myClock.xml',),
+    'miniepg': ('myMiniEPG.xml',),
+    'channels': ('mychannels.xml',),
+    'home': ('home.xml', 'myhome.xml'),
+    'recordings': ('myrecordings.xml',),
+    'videos': ('mymovies.xml', 'myvideo.xml'),
+}
+
+# stand-ins when a skin lacks a home_<name>.png (tried in this order)
+ICON_FALLBACKS = {
+    'epg': ('infos', 'news'), 'epgsearch': ('infos', 'news'), 'now': ('infos', 'news'),
+    'channels': ('videos', 'playlist'), 'favorites': ('videos',),
+    'recordings': ('playlist', 'videos'), 'mymovies': ('videos',), 'myseries': ('videos',),
+    'timer': ('alarms', 'service'), 'clock': ('alarms',), 'timeline': ('timeline_settings', 'alarms'),
+    'cam': ('service', 'settings'), 'teletext': ('news',), 'kodi': ('computer', 'upnp'),
+    'mediacenter_mymovies': ('videos',), 'mediacenter_myseries': ('videos',),
 }
 
 _TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*(?:[+-]\d)?')
@@ -142,13 +154,24 @@ class OSDSkin:
     @staticmethod
     def is_skin_folder(folder):
         return os.path.isfile(os.path.join(folder, 'index.xml')) and \
-            any(os.path.isfile(os.path.join(folder, f)) for f in WINDOW_FILES.values())
+            any(OSDSkin._find_file(folder, names) for names in WINDOW_FILES.values())
+
+    @staticmethod
+    def _find_file(folder, names):
+        try:
+            present = {f.lower(): f for f in os.listdir(folder)}
+        except OSError:
+            return ''
+        for name in names:
+            if name.lower() in present:
+                return os.path.join(folder, present[name.lower()])
+        return ''
 
     # -- lookups ---------------------------------------------------------
     def window(self, key):
         if key not in self._windows:
-            path = os.path.join(self.folder, WINDOW_FILES[key])
-            window = OSDWindow(path) if os.path.isfile(path) else None
+            path = self._find_file(self.folder, WINDOW_FILES[key])
+            window = OSDWindow(path) if path else None
             if window is not None:
                 for ctl in window.controls:
                     if ctl.get('type', '').lower() == 'label':
@@ -176,6 +199,22 @@ class OSDSkin:
             pix = QPixmap(path) if path else None
             self._pixmaps[key] = pix if pix is not None and not pix.isNull() else None
         return self._pixmaps[key]
+
+    def menu_icon(self, name):
+        """Name of an image of THIS skin to show for a windowdef.xml icon: the
+        icon itself, else the nearest stand-in the skin does have (the Default
+        skin e.g. has no home_epg.png), else its generic computer icon."""
+        if not name:
+            return ''
+        if self.pixmap(name) is not None:
+            return name
+        base = name.replace('\\', '/').split('/')[-1].lower()
+        stem = base[5:-4] if base.startswith('home_') and base.endswith('.png') else base
+        for alt in ICON_FALLBACKS.get(stem, ()) + ('computer', 'infos'):
+            candidate = 'home_%s.png' % alt
+            if self.pixmap(candidate) is not None:
+                return candidate
+        return name
 
     def qfont(self, name):
         family, height, style = self.fonts.get((name or 'defaultfont').lower(),
@@ -225,9 +264,9 @@ def _hidden(ctl, values):
 # Skins label some controls with numbers: ids into the host program's language
 # table. These are the ones used by the colour-button legend of the list windows.
 UI_STRINGS = {
-    'de': {'901': 'TV / Radio / Fav', '902': 'EPG anzeigen', '903': 'Favoriten-Editor', '904': 'Kontext',
+    'de': {'901': 'TV / Radio / Fav', '902': 'EPG anzeigen', '903': 'Favoriten-Editor', '904': 'Kontext', '3': 'Videos',
            },
-    'en': {'901': 'TV / Radio / Fav', '902': 'Show EPG', '903': 'Favourites editor', '904': 'Context',
+    'en': {'901': 'TV / Radio / Fav', '902': 'Show EPG', '903': 'Favourites editor', '904': 'Context', '3': 'Videos',
            },
 }
 _language = 'en'
@@ -276,6 +315,8 @@ def _draw_image(painter, skin, ctl, values, rect):
 
 def _draw_label(painter, skin, ctl, values, rect):
     text = expand(ctl.get('label', ''), values)
+    if text.isdigit():   # window title given as a string-table number
+        text = UI_STRINGS[_language].get(text, '')
     if not text or text == '-':
         return
     font = skin.qfont(ctl.get('font'))
@@ -570,8 +611,32 @@ DEFAULT_MENU = [  # the usual HTPC home entries, used when no windowdef.xml is p
     ('600', 'Timeline Window', 'TimeLine', 'home_timeline.png', ''),
     ('3', 'EPG Now Window', "What's now", 'home_now.png', ''),
     ('6', 'Movies Window', 'theMovies', 'home_videos.png', ''),
-    ('-3', 'Kodi', 'Kodi', 'home_kodi.png', 'kodi'),
 ]
+
+
+def ensure_windowdef(folder):
+    """Writes OSDskins/windowdef.xml (the menu template shared by all skins)
+    when it is missing. It can be edited, e.g. to add a Kodi entry:
+    <Window Name="Kodi" Text="Kodi" ID="-3" Parent="0"><Image>home_kodi.png</Image>
+    <Application>path to kodi</Application></Window> (the skin needs home_kodi.png)."""
+    path = os.path.join(folder, 'windowdef.xml')
+    if os.path.exists(path):
+        return path
+    try:
+        os.makedirs(folder, exist_ok=True)
+        lines = ['<?xml version="1.0" encoding="utf-8"?>', '<WindowDefs>', '  <Version>1.07</Version>',
+                 '  <Windows>', '    <Window Name="Home Window" Text="Home" ID="0"/>']
+        for i, n, t, img, app in DEFAULT_MENU:
+            lines.append('    <Window Name="%s" Text="%s" ID="%s" Parent="0">' %
+                         (n, t.replace("'", '&apos;'), i))
+            lines.append('      <Image>%s</Image>' % img)
+            lines.append('    </Window>')
+        lines += ['  </Windows>', '</WindowDefs>', '']
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+    except OSError:
+        pass
+    return path
 
 
 def load_menu_entries(windowdef_path=None):
@@ -615,7 +680,7 @@ class OSDMenuScreen:
         for offset in (-2, -1, 0, 1, 2):
             suffix = '' if offset == 0 else '%+d' % offset
             item = self._item(-offset)
-            values['menufocusimage' + suffix] = item.get('image', '')
+            values['menufocusimage' + suffix] = self.skin.menu_icon(item.get('image', ''))
             values['menufocustext' + suffix] = item.get('display', item.get('text', ''))
         self.values = values
 
