@@ -1177,6 +1177,49 @@ MENU_TEXT_EN = {'Program': 'Channel EPG', 'Channels': 'Channels', 'CAM Menu': 'C
                 "What's now": "What's on now", 'theMovies': 'Videos', 'Kodi': 'Kodi'}
 
 
+MEDIA_EXTENSIONS = ('.ts', '.m2ts', '.mts', '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.mpg', '.mpeg',
+                    '.wmv', '.flv', '.webm', '.vob', '.divx', '.mp3', '.flac', '.m4a', '.ogg')
+
+
+def list_media_folder(folder, root, newest_first=False):
+    """OSD file list rows for a folder: '..' (below the root), sub-folders, playable files"""
+    rows = []
+    if os.path.normpath(folder) != os.path.normpath(root):
+        rows.append({'label1': '..', 'label2': '', 'label3': '', 'icon': '',
+                     'data': {'dir': os.path.dirname(os.path.normpath(folder)), 'up': True}})
+    dirs, files = [], []
+    try:
+        for entry in os.scandir(folder):
+            if entry.name.startswith('.'):
+                continue
+            try:
+                if entry.is_dir():
+                    dirs.append(entry)
+                elif entry.name.lower().endswith(MEDIA_EXTENSIONS):
+                    files.append(entry)
+            except OSError:
+                continue
+    except OSError:
+        return rows
+    dirs.sort(key=lambda e: e.name.lower())
+    if newest_first:
+        files.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+    else:
+        files.sort(key=lambda e: e.name.lower())
+    for e in dirs:
+        rows.append({'label1': e.name + '/', 'label2': '', 'label3': '', 'icon': '', 'data': {'dir': e.path}})
+    for e in files:
+        st = e.stat()
+        size = st.st_size / (1024 * 1024)
+        # skins place columns 2/3 differently, so everything goes into one text column
+        rows.append({'label1': "%s    %s  \u00b7  %s" % (
+                         os.path.splitext(e.name)[0],
+                         datetime.fromtimestamp(st.st_mtime).strftime('%d.%m.%y %H:%M'),
+                         f"{size / 1024:.1f} GB" if size >= 1024 else f"{size:.0f} MB"),
+                     'label2': '', 'label3': '', 'icon': '', 'data': {'file': e.path}})
+    return rows
+
+
 class ChannelPickerDialog(QDialog):
     """Plain channel chooser, built fresh every time it is opened: type to
     filter, Up/Down to move, Enter to tune. (The old persistent channel dialog
@@ -1636,6 +1679,13 @@ class TVHeadendClient(QMainWindow):
         self.favorites_menu = favorites_menu
         self.settings_menu = settings_menu
 
+        play_rec_action = QAction("Play Recording...", self)
+        play_rec_action.triggered.connect(lambda: self.open_media_browser('recordings'))
+        file_menu.addAction(play_rec_action)
+        play_vid_action = QAction("Play Video...", self)
+        play_vid_action.triggered.connect(lambda: self.open_media_browser('videos'))
+        file_menu.addAction(play_vid_action)
+
         # Add User Guide action to Help menu
         user_guide_action = QAction("User Guide", self)
         user_guide_action.triggered.connect(self.show_user_guide)
@@ -1731,6 +1781,13 @@ class TVHeadendClient(QMainWindow):
         kodi_path_action = QAction("Kodi Path...", self)
         kodi_path_action.triggered.connect(self.set_kodi_path)
         settings_menu.addAction(kodi_path_action)
+
+        video_folder_action = QAction("Video Folder...", self)
+        video_folder_action.triggered.connect(lambda: self.set_media_folder('videos'))
+        settings_menu.addAction(video_folder_action)
+        rec_folder_action = QAction("Recordings Folder...", self)
+        rec_folder_action.triggered.connect(lambda: self.set_media_folder('recordings'))
+        settings_menu.addAction(rec_folder_action)
 
         keys_action = QAction("Keyboard / Remote Keys...", self)
         keys_action.triggered.connect(self.edit_keymap)
@@ -2514,8 +2571,19 @@ class TVHeadendClient(QMainWindow):
         if self.osd_screen is not None and self._osd_mode == mode:
             self.close_osd_window()      # same key again = toggle off
             return
+        if key in ('recordings', 'videos'):
+            root = self.media_folder(key)
+            if not root:
+                self._osd_notice("Set the folder first (Settings -> %s Folder...)" %
+                                 ('Recordings' if key == 'recordings' else 'Video'))
+                return
         self._osd_mode = mode
-        if key == 'channels':
+        if key in ('recordings', 'videos'):
+            screen = osdskin.OSDScreen(self.osd_skin, key, on_ok=self._osd_file_ok)
+            screen.root = screen.folder = root
+            self.osd_screen = screen
+            self._osd_fill_files()
+        elif key == 'channels':
             channels = self.channels
             if favourites:
                 names = self.config.get('favorites', [])
@@ -2535,7 +2603,7 @@ class TVHeadendClient(QMainWindow):
             self.osd_screen = screen
             self._osd_fill_events()
         elif key == 'home':
-            entries = osdskin.load_menu_entries(os.path.join(self.osd_skins_dir, 'windowdef.xml'))
+            entries = osdskin.load_menu_entries(osdskin.ensure_windowdef(self.osd_skins_dir))
             german = QLocale.system().language() == QLocale.German
             names = MENU_TEXT_DE if german else MENU_TEXT_EN
             for entry in entries:
@@ -2567,7 +2635,15 @@ class TVHeadendClient(QMainWindow):
     def osd_action(self, action):
         if self.osd_screen is None:
             return
-        if action == 'back':
+        screen = self.osd_screen
+        if action == 'back' and getattr(screen, 'folder', None) and \
+                os.path.normpath(screen.folder) != os.path.normpath(screen.root):
+            screen.folder = os.path.dirname(os.path.normpath(screen.folder))
+            self._osd_fill_files()
+            self._touch_osd()
+            if self.osd_overlay is not None:
+                self.osd_overlay.update()
+        elif action == 'back':
             self.close_osd_window()
         else:
             self.osd_screen.handle(action)
@@ -2630,10 +2706,81 @@ class TVHeadendClient(QMainWindow):
             self.launch_kodi()
         elif entry_id == '1':                 # Channel Window -> skinned channel list
             QTimer.singleShot(0, lambda: self.open_osd_window('channels'))
+        elif entry_id == '603':               # Recordings
+            QTimer.singleShot(0, lambda: self.open_osd_window('recordings'))
+        elif entry_id == '6':                 # Movies / Videos
+            QTimer.singleShot(0, lambda: self.open_osd_window('videos'))
         elif entry_id == '102':               # Clock
             self.show_osd('clock', 5000)
         else:
             self._osd_notice(f"{entry.get('display', entry.get('text', ''))}: not available yet")
+
+    def media_folder(self, key):
+        """Folder for 'recordings' or 'videos' ('' if unset / missing)"""
+        if key == 'recordings':
+            path = self.config.get('recordings_path') or self.config.get('recording_path', '')
+        else:
+            path = self.config.get('video_path', '')
+        return path if path and os.path.isdir(path) else ''
+
+    def set_media_folder(self, key):
+        title = "Recordings Folder" if key == 'recordings' else "Video Folder"
+        start = self.media_folder(key) or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, title, start, QFileDialog.DontUseNativeDialog)
+        if chosen:
+            self.config['recordings_path' if key == 'recordings' else 'video_path'] = chosen
+            self.save_config()
+            self.statusbar.showMessage(f"{title}: {chosen}")
+
+    def open_media_browser(self, key):
+        """File menu: skinned list when a skin is on, plain file dialog otherwise"""
+        if self.osd_skin is not None and self.osd_skin.window(key) is not None:
+            self.open_osd_window(key)
+            return
+        folder = self.media_folder(key)
+        if not folder:
+            self.set_media_folder(key)
+            folder = self.media_folder(key)
+            if not folder:
+                return
+        filt = "Media (%s);;All Files (*)" % ' '.join('*' + e for e in MEDIA_EXTENSIONS)
+        chosen, _ = QFileDialog.getOpenFileName(self, "Play", folder, filt,
+                                                options=QFileDialog.DontUseNativeDialog)
+        if chosen:
+            self.play_media_file(chosen)
+
+    def _osd_fill_files(self):
+        screen = self.osd_screen
+        rows = list_media_folder(screen.folder, screen.root, newest_first=(screen.key == 'recordings'))
+        list_id = next(iter(screen.lists), None)
+        if list_id is None:
+            return
+        screen.lists[list_id].set_items(rows, 1 if rows and rows[0]['data'].get('up') and len(rows) > 1 else 0)
+        screen.values = {'itemcount': str(len([r for r in rows if not r['data'].get('up')])),
+                         'channelname': os.path.basename(os.path.normpath(screen.folder))}
+
+    def _osd_file_ok(self, list_id, item):
+        if not item:
+            return
+        data = item['data']
+        if 'dir' in data:
+            self.osd_screen.folder = data['dir']
+            self._osd_fill_files()
+        elif 'file' in data:
+            self.close_osd_window()
+            self.play_media_file(data['file'])
+
+    def play_media_file(self, path):
+        """Play a recording / video file in the main player"""
+        if self.kodi_active:
+            self.statusbar.showMessage("Kodi is running - playback is paused until it is closed")
+            return
+        try:
+            self.media_player.set_media(self.instance.media_new(path))
+            self.media_player.play()
+            self.statusbar.showMessage(f"Playing: {os.path.basename(path)}")
+        except Exception as e:
+            self.statusbar.showMessage(f"Couldn't play {os.path.basename(path)}: {e}")
 
     def _osd_changed(self, list_id, item):
         if list_id == '2':
@@ -3575,7 +3722,7 @@ class TVHeadendClient(QMainWindow):
             # recording was saved (falls back to the home directory)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"recording_{channel_name}_{timestamp}.ts"  # Using .ts format initially
-            default_dir = self.config.get('recording_path', str(Path.home()))
+            default_dir = self.config.get('recordings_path') or self.config.get('recording_path', str(Path.home()))
             if not default_dir or not os.path.isdir(default_dir):
                 default_dir = str(Path.home())
             default_path = os.path.join(default_dir, default_filename)
