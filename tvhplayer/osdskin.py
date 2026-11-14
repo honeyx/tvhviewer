@@ -9,11 +9,13 @@ into the OSDskins folder themselves.
 """
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, QRectF, QPointF
-from PyQt5.QtGui import QColor, QPainter, QPixmap, QFont
+from PyQt5.QtCore import Qt, QRectF, QPointF, QLocale
+from PyQt5.QtGui import (QColor, QPainter, QPixmap, QFont, QFontMetrics, QLinearGradient,
+                         QPolygonF, QPen)
 from PyQt5.QtWidgets import QWidget
 
 # Which skin file draws which OSD (by file name, as found in the skin folder)
@@ -26,6 +28,10 @@ WINDOW_FILES = {   # every entry: candidate file names, first existing one wins 
     'homemain': ('myhome.xml', 'home.xml'),      # the main menu
     'recordings': ('myrecordings.xml',),
     'videos': ('mymovies.xml', 'myvideo.xml'),
+    'pictures': ('mypics.xml',),
+    'music': ('mymusicfiles.xml',),
+    'epgchannel': ('myepgchannel.xml',),
+    'timeline': ('mytvguide.xml',),
 }
 
 _TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*(?:[+-]\d)?')
@@ -114,7 +120,22 @@ class OSDSkin:
         self.size_x = _num(info, 'sizex', 1280) or 1280.0
         self.size_y = _num(info, 'sizey', 720) or 720.0
 
+    def _register_font_files(self):
+        """font.xml names font *families*; load the skin's own .ttf/.otf files so they exist"""
+        from PyQt5.QtGui import QFontDatabase
+        try:
+            folders = [os.path.join(self.folder, d) for d in os.listdir(self.folder)
+                       if d.lower() in ('font', 'fonts') and os.path.isdir(os.path.join(self.folder, d))]
+        except OSError:
+            return
+        for base in folders:
+            for dirpath, _dirs, files in os.walk(base):
+                for f in files:
+                    if f.lower().endswith(('.ttf', '.otf')):
+                        QFontDatabase.addApplicationFont(os.path.join(dirpath, f))
+
     def _load_fonts(self):
+        self._register_font_files()
         path = os.path.join(self.folder, 'font.xml')
         if not os.path.isfile(path):
             return
@@ -180,17 +201,34 @@ class OSDSkin:
             self._windows[key] = window
         return self._windows[key]
 
+    def _index_images(self):
+        """lower-case name -> path for every file below the skin's images folder
+        (any spelling of the folder name, sub folders included)"""
+        index = {}
+        try:
+            folders = [os.path.join(self.folder, d) for d in os.listdir(self.folder)
+                       if d.lower() in ('images', 'image', 'media') and os.path.isdir(os.path.join(self.folder, d))]
+        except OSError:
+            folders = []
+        for base in folders:
+            for dirpath, _dirs, files in os.walk(base):
+                for f in files:
+                    path = os.path.join(dirpath, f)
+                    rel = os.path.relpath(path, base).replace('\\', '/').lower()
+                    index.setdefault(rel, path)
+                    index.setdefault(f.lower(), path)
+        return index
+
     def pixmap(self, name):
-        """Image from the skin's Images folder (case-insensitive), or None"""
+        """Image from the skin's images folder (case-insensitive), or None"""
         if not name or name == '-':
             return None
         if self._image_index is None:
-            images = os.path.join(self.folder, 'Images')
-            self._image_index = {f.lower(): os.path.join(images, f)
-                                 for f in os.listdir(images)} if os.path.isdir(images) else {}
-        key = name.replace('\\', '/').split('/')[-1].lower()
+            self._image_index = self._index_images()
+        norm = name.replace('\\', '/').lower()
+        key = norm
         if key not in self._pixmaps:
-            path = self._image_index.get(key)
+            path = self._image_index.get(norm) or self._image_index.get(norm.split('/')[-1])
             if not path and os.path.isfile(name):  # absolute path (e.g. channel logo)
                 path = name
             pix = QPixmap(path) if path else None
@@ -402,6 +440,19 @@ def _draw_menu_list(painter, skin, ctl, button, screen, rect):
     painter.restore()
 
 
+def _draw_textbox(painter, skin, ctl, values, rect):
+    """Multi-line text (descriptions): wrapped, from the top"""
+    text = expand(ctl.get('label', ''), values)
+    if not text:
+        return
+    painter.setFont(skin.qfont(ctl.get('font')))
+    painter.setPen(parse_color(ctl.get('textcolor'), 'FFFFFFFF'))
+    painter.save()
+    painter.setClipRect(rect)
+    painter.drawText(rect, int(Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap), text)
+    painter.restore()
+
+
 def _draw_progress(painter, skin, ctl, values, rect):
     """progress / tickprogress: draw the background part, then the 'mid' part
     clipped to the current value (horizontal, or vertical when direction=1)."""
@@ -436,7 +487,7 @@ def render(painter, skin, key, values, width, height, screen=None):
     painter.scale(width / skin.size_x, height / skin.size_y)
     if screen is not None:
         # the window's own <Backdrop>; windows without one use background.png when hasbg="true"
-        name = window.backdrop if window.backdrop is not None else ('background.png' if window.has_bg else '')
+        name = window.backdrop if window.backdrop else ('background.png' if window.has_bg and window.backdrop != '-' else '')
         backdrop = skin.pixmap(name) if name and name != '-' else None
         if backdrop is not None:
             painter.save()
@@ -448,7 +499,15 @@ def render(painter, skin, key, values, width, height, screen=None):
             continue
         ctype = ctl.get('type', '').lower()
         rect = _rect(ctl)
-        if ctype == 'image':
+        if screen is not None and getattr(screen, 'key', '') == 'timeline':
+            if ctl.get('id') == '2' and ctype == 'image':
+                _draw_timeline_grid(painter, skin, screen, rect)
+                continue
+            if ctype == 'image' and ctl.get('id') in ('4', '7', '25'):   # templates the grid code uses
+                continue
+        if ctype == 'textbox':
+            _draw_textbox(painter, skin, ctl, values, rect)
+        elif ctype == 'image':
             _draw_image(painter, skin, ctl, values, rect)
         elif ctype == 'label':
             _draw_label(painter, skin, ctl, values, rect)
@@ -786,6 +845,256 @@ def skin_has(skin, key):
     return skin.window(key) is not None
 
 
+# DVB content descriptor, first level (EN 300 468), for the genre line of a timeline cell
+GENRE_NAMES = {1: 'movie/drama', 2: 'news/current affairs', 3: 'show/game show', 4: 'sports',
+               5: "children's/youth programmes", 6: 'music/ballet/dance', 7: 'arts/culture',
+               8: 'social/political issues/economics', 9: 'education/science/factual topics',
+               10: 'leisure hobbies'}
+
+
+def genre_text(event):
+    """Genre line of an EPG event ('' if it has none)"""
+    genre = event.get('genre') or event.get('category')
+    if isinstance(genre, (list, tuple)) and genre:
+        genre = genre[0]
+    if isinstance(genre, int):
+        return GENRE_NAMES.get((genre >> 4) & 15, '')
+    return genre if isinstance(genre, str) else ''
+
+
+class OSDTimeline:
+    """The timeline window: channels as rows, programmes as cells on a two hour
+    time axis. DVBViewer draws that grid itself and takes only positions, fonts
+    and colours from template controls of the skin (ids 2, 7, 18, 23-30, 40, 25),
+    which is what _draw_timeline_grid reads. The channel being watched sits in the
+    middle row, the grid starts at the half hour before now and the marker shows now."""
+    SPAN = 120 * 60
+
+    def __init__(self, skin, channels, events_fn, current_uuid='', on_ok=None):
+        self.skin, self.key = skin, 'timeline'
+        self.channels, self.events_fn, self.on_ok = channels, events_fn, on_ok
+        self.lists, self.focus, self.values = {}, None, {}
+        self.window = skin.window('timeline')
+        self.rows = self._row_count()
+        self.index = next((i for i, c in enumerate(channels) if c.get('uuid') == current_uuid), 0)
+        self.now = time.time()
+        self.cursor = self.now
+        self.start = self._floor(self.now)
+        self.event = None
+        self._select()
+
+    # -- template geometry -----------------------------------------------
+    def template(self, ident, kind=None):
+        for ctl in (self.window.controls if self.window else []):
+            if ctl.get('id') == ident and (kind is None or ctl.get('type', '').lower() == kind):
+                return ctl
+        return None
+
+    def _row_count(self):
+        panel, logo, name = self.template('2', 'image'), self.template('7'), self.template('18', 'label')
+        if not (panel and logo and name):
+            return 5
+        header = _num(logo, 'y') - _num(panel, 'y')
+        row_h = _num(name, 'y') + _num(name, 'height') - _num(logo, 'y')
+        return max(1, round((_num(panel, 'height') - header) / row_h)) if row_h > 0 else 5
+
+    @staticmethod
+    def _floor(t):
+        return t - t % 1800
+
+    # -- data ---------------------------------------------------------------
+    def last_stop(self):
+        return max((ev.get('stop', 0) for c in self.channels[:1] for ev in self.events(c)), default=self.now)
+
+    def channel(self, offset=0):
+        return self.channels[(self.index + offset) % len(self.channels)]
+
+    def events(self, channel):
+        return self.events_fn(channel)
+
+    def _event_at(self, channel, t):
+        events = self.events(channel)
+        for ev in events:
+            if ev.get('start', 0) <= t < ev.get('stop', 0):
+                return ev
+        return next((ev for ev in events if ev.get('start', 0) >= t), None)
+
+    def _select(self):
+        self.event = self._event_at(self.channel(), self.cursor)
+        if self.event is not None and not (self.start <= self.event['start'] < self.start + self.SPAN) \
+                and not (self.event['start'] <= self.start < self.event['stop']):
+            self.start = self._floor(max(self.event['start'], self.now - 1800) if self.event['start'] < self.now
+                                     else self.event['start'])
+        ev = self.event or {}
+        title = ev.get('title')
+        if isinstance(title, dict):
+            title = next(iter(title.values()), '')
+        desc = ev.get('description') or ev.get('summary') or ''
+        if isinstance(desc, dict):
+            desc = next(iter(desc.values()), '')
+        when = ''
+        if ev:
+            a, b = time.localtime(ev['start']), time.localtime(ev['stop'])
+            when = '%s %d. %02d:%02d-%02d:%02d' % (QLocale().dayName(a.tm_wday + 1, QLocale.ShortFormat),
+                                                  a.tm_mday, a.tm_hour, a.tm_min, b.tm_hour, b.tm_min)
+        self.values = {'tv.guide.title': title or '', 'tv.guide.time': when, 'tv.guide.description': desc,
+                       'mr.currentwindowtitle': 'Timeline', 'channelname': '', 'tv.now.start': '',
+                       'tv.now.title': '', 'tv.guide.chlogo': ''}
+
+    # -- remote control -----------------------------------------------------------
+    def handle(self, action):
+        if not self.channels:
+            return False
+        if action in ('up', 'down', 'pageup', 'pagedown'):
+            step = {'up': -1, 'down': 1, 'pageup': -self.rows, 'pagedown': self.rows}[action]
+            self.index = (self.index + step) % len(self.channels)
+            self._select()
+            return True
+        if action in ('left', 'right'):
+            events = self.events(self.channel())
+            if self.event in events:
+                i = events.index(self.event) + (-1 if action == 'left' else 1)
+                if 0 <= i < len(events):
+                    self.cursor = events[i]['start']
+                    if self.cursor < self.start:
+                        self.start = self._floor(self.cursor)
+                    elif self.cursor >= self.start + self.SPAN - 600:
+                        self.start = self._floor(self.cursor)
+                    self._select()
+            return True
+        if action == 'ok' and self.on_ok:
+            self.on_ok(self.channel())
+            return True
+        return False
+
+
+def _draw_timeline_grid(painter, skin, screen, panel):
+    """Channels, time axis, programme cells and the 'now' marker inside the panel rectangle"""
+    t = screen.template
+    logo, name, head = t('7'), t('18', 'label'), t('40', 'label')
+    title_t, genre_t = t('24', 'label'), t('30', 'label') or t('23', 'label')
+    if not (logo and name):
+        return
+    header = _num(logo, 'y') - panel.y()
+    row_h = _num(name, 'y') + _num(name, 'height') - _num(logo, 'y')
+    left = _num(head, 'x') if head else panel.x() + panel.width() * 0.15
+    right = panel.right()
+    ppm = (right - left) / (screen.SPAN / 60.0)
+    t0, t1 = screen.start, screen.start + screen.SPAN
+    painter.save()
+    painter.setClipRect(QRectF(panel.x() - 40, panel.y() - 80, panel.width() + 80, panel.height() + 160))
+
+    # time axis labels + day / interval texts
+    if head:
+        painter.setFont(skin.qfont(head.get('font')))
+        painter.setPen(parse_color(head.get('textcolor'), 'FFFFFFFF'))
+        align = Qt.AlignRight if head.get('align', '').lower() == 'right' else Qt.AlignLeft
+        for i in range(4):
+            stamp = time.localtime(t0 + i * 1800)
+            box = QRectF(left + i * 30 * ppm, _num(head, 'y'), _num(head, 'width', 140), _num(head, 'height', 30))
+            painter.drawText(box, int(align | Qt.AlignVCenter), '%02d:%02d' % (stamp.tm_hour, stamp.tm_min))
+    day_ctl, span_ctl = t('6', 'spincontrol'), t('8', 'spincontrol')
+    for ctl, text in ((day_ctl, None), (span_ctl, '(2/4)')):
+        if ctl is None:
+            continue
+        if text is None:
+            a = time.localtime(t0)
+            days = max(1, int((screen.last_stop() - screen.now) // 86400) + 1)
+            d = max(1, int((screen._floor(t0) - screen._floor(screen.now - screen.now % 86400)) // 86400) + 1)
+            text = '(%d/%d) %s %d.%d' % (min(d, days), days, QLocale().dayName(a.tm_wday + 1, QLocale.ShortFormat),
+                                         a.tm_mday, a.tm_mon)
+        painter.setFont(skin.qfont(ctl.get('font')))
+        painter.setPen(parse_color(ctl.get('textcolor') or (head or {}).get('textcolor'), 'FFFFFFFF'))
+        box = QRectF(_num(ctl, 'x') + _num(ctl, 'width') + 4, _num(ctl, 'y'), 220, _num(ctl, 'height'))
+        painter.drawText(box, int(Qt.AlignLeft | Qt.AlignVCenter), text)
+
+    # rows
+    middle = screen.rows // 2
+    for r in range(screen.rows):
+        channel = screen.channel(r - middle)
+        top = panel.y() + header + r * row_h
+        # logo (when known) and channel name
+        logo_pix = skin.pixmap(channel.get('logo', ''))
+        if logo_pix is not None:
+            painter.drawPixmap(QRectF(_num(logo, 'x'), top, _num(logo, 'width'), _num(logo, 'height')),
+                               logo_pix, QRectF(logo_pix.rect()))
+        painter.setFont(skin.qfont(name.get('font')))
+        painter.setPen(parse_color(name.get('textcolor'), 'FFFFFFFF'))
+        label = QRectF(_num(name, 'x'), top + (_num(name, 'y') - _num(logo, 'y')), _num(name, 'width'), _num(name, 'height'))
+        painter.drawText(label, int(Qt.AlignLeft | Qt.AlignVCenter),
+                         QFontMetrics(painter.font()).elidedText(channel.get('name', ''), Qt.ElideRight, int(label.width())))
+        # programme cells
+        for ev in screen.events(channel):
+            if ev.get('stop', 0) <= t0 or ev.get('start', 0) >= t1:
+                continue
+            x0 = left + (max(ev['start'], t0) - t0) / 60.0 * ppm
+            x1 = left + (min(ev['stop'], t1) - t0) / 60.0 * ppm
+            cell = QRectF(x0 + 1, top + 1, max(2.0, x1 - x0 - 2), row_h - 3)
+            selected = ev is screen.event and r == middle
+            running = ev['start'] <= screen.now < ev['stop']
+            grad = QLinearGradient(cell.topLeft(), cell.bottomLeft())
+            if selected:
+                grad.setColorAt(0, QColor(110, 170, 205)); grad.setColorAt(0.5, QColor(60, 120, 160))
+                grad.setColorAt(1, QColor(30, 75, 110))
+            elif running:
+                grad.setColorAt(0, QColor(120, 120, 120)); grad.setColorAt(0.5, QColor(70, 70, 70))
+                grad.setColorAt(1, QColor(35, 35, 35))
+            else:
+                grad.setColorAt(0, QColor(60, 60, 60)); grad.setColorAt(0.5, QColor(30, 30, 30))
+                grad.setColorAt(1, QColor(14, 14, 14))
+            painter.fillRect(cell, grad)
+            painter.setPen(QPen(QColor(150, 150, 150, 160), 1))
+            painter.drawLine(cell.topLeft(), cell.topRight())
+            painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
+            painter.drawRect(cell)
+            # arrows: the programme continues beyond the visible part
+            mid, size = cell.center().y(), min(row_h * 0.22, 16)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(210, 210, 210, 200))
+            if ev['start'] < t0:
+                painter.drawPolygon(QPolygonF([QPointF(cell.left() + 3, mid), QPointF(cell.left() + 3 + size, mid - size),
+                                               QPointF(cell.left() + 3 + size, mid + size)]))
+            if ev['stop'] > t1:
+                painter.drawPolygon(QPolygonF([QPointF(cell.right() - 3, mid), QPointF(cell.right() - 3 - size, mid - size),
+                                               QPointF(cell.right() - 3 - size, mid + size)]))
+            painter.setBrush(Qt.NoBrush)
+            # texts
+            pad = 8 + (size + 4 if ev['start'] < t0 else 0)
+            width = cell.width() - pad - 8 - (size + 4 if ev['stop'] > t1 else 0)
+            if width < 14:
+                continue
+            title = ev.get('title')
+            if isinstance(title, dict):
+                title = next(iter(title.values()), '')
+            font = skin.qfont((title_t or {}).get('font'))
+            painter.setFont(font)
+            tcolor = (title_t or {}).get('textselectedcolor') if selected else (title_t or {}).get('textcolor')
+            painter.setPen(parse_color(tcolor or (title_t or {}).get('textcolor'), 'FFFFFFFF'))
+            line = font.pixelSize() * 1.3
+            has_genre = bool(genre_text(ev)) and row_h >= line * 2.2
+            y = cell.top() + (cell.height() - line * (2 if has_genre else 1)) / 2
+            fm = QFontMetrics(font)
+            painter.drawText(QRectF(cell.left() + pad, y, width, line), int(Qt.AlignLeft | Qt.AlignVCenter),
+                             fm.elidedText(title or '', Qt.ElideRight, int(width)))
+            if has_genre:
+                painter.setPen(parse_color((genre_t or title_t or {}).get('textcolor'), 'FFDDDDDD'))
+                painter.drawText(QRectF(cell.left() + pad, y + line, width, line), int(Qt.AlignLeft | Qt.AlignVCenter),
+                                 fm.elidedText(genre_text(ev), Qt.ElideRight, int(width)))
+
+    # marker for the current time
+    marker = t('25', 'image')
+    x = left + (screen.now - t0) / 60.0 * ppm
+    if marker is not None and left <= x <= right:
+        pix = skin.pixmap(marker.get('texture', ''))
+        w, h = max(1.0, _num(marker, 'width', 2)), _num(marker, 'height', panel.height())
+        if pix is not None:
+            painter.drawPixmap(QRectF(x - w / 2, _num(marker, 'y'), w, h), pix, QRectF(pix.rect()))
+        else:
+            painter.setPen(QPen(QColor(255, 60, 60), 2))
+            painter.drawLine(QPointF(x, panel.y() + header - 6), QPointF(x, panel.bottom()))
+    painter.restore()
+
+
 def find_skins(root_folder):
     """{display name: folder} for every valid skin below root_folder"""
     skins = {}
@@ -812,6 +1121,7 @@ class OSDOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.skin = None
         self.screen = None  # OSDScreen drawn on the 'screen' layer
+        self.picture = None  # QPixmap shown on the 'picture' layer
         self.opacity = 1.0  # user setting: how see-through the whole OSD is
         self.notice_text = ''
         self.values = {}
@@ -895,6 +1205,15 @@ class OSDOverlay(QWidget):
         for key in list(self.layers):
             if key == 'notice':
                 self._paint_notice(painter)
+            elif key == 'picture':
+                if self.picture is not None and not self.picture.isNull():
+                    painter.save()
+                    painter.setOpacity(1.0)
+                    painter.fillRect(self.rect(), QColor(0, 0, 0))
+                    scaled = self.picture.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    painter.drawPixmap((self.width() - scaled.width()) // 2,
+                                       (self.height() - scaled.height()) // 2, scaled)
+                    painter.restore()
             elif key == 'screen':
                 if self.screen is not None:
                     render(painter, self.skin, getattr(self.screen, 'window_key', self.screen.key), {**self.values, **self.screen.values},
