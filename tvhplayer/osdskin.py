@@ -22,19 +22,10 @@ WINDOW_FILES = {   # every entry: candidate file names, first existing one wins 
     'clock': ('myClock.xml',),
     'miniepg': ('myMiniEPG.xml',),
     'channels': ('mychannels.xml',),
-    'home': ('home.xml', 'myhome.xml'),
+    'home': ('home.xml', 'myhome.xml'),          # sub menus (Media Center, System, ...)
+    'homemain': ('myhome.xml', 'home.xml'),      # the main menu
     'recordings': ('myrecordings.xml',),
     'videos': ('mymovies.xml', 'myvideo.xml'),
-}
-
-# stand-ins when a skin lacks a home_<name>.png (tried in this order)
-ICON_FALLBACKS = {
-    'epg': ('infos', 'news'), 'epgsearch': ('infos', 'news'), 'now': ('infos', 'news'),
-    'channels': ('videos', 'playlist'), 'favorites': ('videos',),
-    'recordings': ('playlist', 'videos'), 'mymovies': ('videos',), 'myseries': ('videos',),
-    'timer': ('alarms', 'service'), 'clock': ('alarms',), 'timeline': ('timeline_settings', 'alarms'),
-    'cam': ('service', 'settings'), 'teletext': ('news',), 'kodi': ('computer', 'upnp'),
-    'mediacenter_mymovies': ('videos',), 'mediacenter_myseries': ('videos',),
 }
 
 _TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*(?:[+-]\d)?')
@@ -99,6 +90,7 @@ class OSDSkin:
         self._windows = {}
         self._pixmaps = {}
         self._image_index = None
+        self.missing_icons = set()
         self._load_info()
         self._load_fonts()
         self._load_references()
@@ -201,20 +193,11 @@ class OSDSkin:
         return self._pixmaps[key]
 
     def menu_icon(self, name):
-        """Name of an image of THIS skin to show for a windowdef.xml icon: the
-        icon itself, else the nearest stand-in the skin does have (the Default
-        skin e.g. has no home_epg.png), else its generic computer icon."""
-        if not name:
-            return ''
-        if self.pixmap(name) is not None:
-            return name
-        base = name.replace('\\', '/').split('/')[-1].lower()
-        stem = base[5:-4] if base.startswith('home_') and base.endswith('.png') else base
-        for alt in ICON_FALLBACKS.get(stem, ()) + ('computer', 'infos'):
-            candidate = 'home_%s.png' % alt
-            if self.pixmap(candidate) is not None:
-                return candidate
-        return name
+        """Icon name for a menu entry. Like DVBViewer, an icon the skin lacks stays
+        empty (noted in missing_icons, which the app writes to tvhviewer.log)."""
+        if name and self.pixmap(name) is None:
+            self.missing_icons.add(name)
+        return name or ''
 
     def qfont(self, name):
         family, height, style = self.fonts.get((name or 'defaultfont').lower(),
@@ -385,6 +368,35 @@ def _draw_menu_label(painter, skin, ctl, values, rect):
     painter.drawText(rect, int(Qt.AlignHCenter | Qt.AlignVCenter), text)
 
 
+def _draw_menu_list(painter, skin, ctl, button, screen, rect):
+    """A Menu control that is a vertical list of buttons (e.g. the Default skin's main
+    menu): the focused entry sits in the middle row and the list wraps around"""
+    step = _num(button, 'height', 40) or 40
+    focus_img = _sub(ctl, 'imgfocus')
+    label = _sub(ctl, 'buttonlabel') or {}
+    rows = max(1, int(rect.height() // step))
+    items, n = screen.items, len(screen.items)
+    if n <= rows:
+        layout = [(r, r) for r in range(n)]
+    else:
+        layout = [(r, (screen.index + r - rows // 2) % n) for r in range(rows)]
+    painter.save()
+    painter.setClipRect(rect)
+    painter.setFont(skin.qfont(label.get('font')))
+    for row, index in layout:
+        row_rect = QRectF(rect.x(), rect.y() + row * step, rect.width(), step)
+        selected = index == screen.index
+        if selected and focus_img:
+            _draw_image(painter, skin, dict(focus_img), {}, QRectF(row_rect))
+        color = (ctl.get('selectedcolor') or label.get('textselectedcolor')) if selected else \
+            (label.get('disabledcolor') or label.get('textcolor'))
+        painter.setPen(parse_color(color, 'FFFFFFFF'))
+        item = items[index]
+        text_rect = row_rect.adjusted(_num(button, 'textoffsetx', 0) + 8, 0, -6, 0)
+        painter.drawText(text_rect, int(Qt.AlignLeft | Qt.AlignVCenter), item.get('display', item.get('text', '')))
+    painter.restore()
+
+
 def _draw_progress(painter, skin, ctl, values, rect):
     """progress / tickprogress: draw the background part, then the 'mid' part
     clipped to the current value (horizontal, or vertical when direction=1)."""
@@ -437,7 +449,11 @@ def render(painter, skin, key, values, width, height, screen=None):
         elif ctype == 'togglebutton' and screen is not None and getattr(screen, 'key', '') == 'channels':
             _draw_group_banner(painter, skin, ctl, screen, values, window)
         elif ctype == 'menu' and screen is not None and getattr(screen, 'key', '') == 'home':
-            _draw_menu_label(painter, skin, ctl, screen.values, rect)
+            button = _sub(ctl, 'button') or {}
+            if button and rect.height() >= _num(button, 'height', rect.height()) * 1.5:
+                _draw_menu_list(painter, skin, ctl, button, screen, rect)   # vertical list menu
+            else:
+                _draw_menu_label(painter, skin, ctl, screen.values, rect)   # ring: name of the focused entry
         elif ctype == 'listcontrol' and screen is not None and ctl.get('id') in screen.lists:
             _draw_list(painter, skin, ctl, screen.lists[ctl['id']], screen.focus == ctl['id'])
         # buttons / spincontrols / videowindow are interactive or HTPC-only: skipped
@@ -640,61 +656,119 @@ def ensure_windowdef(folder):
 
 
 def load_menu_entries(windowdef_path=None):
-    """Home-menu entries (enabled, parent 0) from a windowdef.xml, in file order;
-    falls back to a built-in list. Each entry: id, name, text, image, application."""
+    """Menu entries of a windowdef.xml in file order. Every entry has a parent:
+    '0' = main menu, otherwise the ID of the entry whose sub menu it belongs to
+    (1000 = Media Center, 24 = System, 8 = Settings). Windows without a Parent or
+    with <enabled>0</enabled> are left out. Falls back to a built-in list.
+    Each entry: id, name, text, image, application, script, parent."""
     entries = []
     if windowdef_path and os.path.isfile(windowdef_path):
         try:
             for win in ET.parse(windowdef_path).getroot().iter('Window'):
-                if win.get('Parent') != '0' or (win.findtext('enabled') or '1').strip() == '0':
+                parent = win.get('Parent')
+                if parent is None or (win.findtext('enabled') or '1').strip() == '0':
                     continue
                 entries.append({'id': win.get('ID') or '', 'name': win.get('Name') or '',
                                 'text': win.get('Text') or win.get('Name') or '',
                                 'image': (win.findtext('Image') or '').strip(),
-                                'application': (win.findtext('Application') or '').strip()})
+                                'application': (win.findtext('Application') or '').strip(),
+                                'script': (win.findtext('Script') or '').strip(),
+                                'parent': parent})
         except ET.ParseError:
             entries = []
-    if not entries:
-        entries = [{'id': i, 'name': n, 'text': t, 'image': img, 'application': app}
-                   for i, n, t, img, app in DEFAULT_MENU]
+    if not any(e['parent'] == '0' for e in entries):
+        entries = [{'id': i, 'name': n, 'text': t, 'image': img, 'application': app,
+                    'script': '', 'parent': '0'} for i, n, t, img, app in DEFAULT_MENU]
     return entries
 
 
 class OSDMenuScreen:
-    """The home menu: a ring of entries, the focused one in the middle and two
-    neighbours on each side. The skin draws it via #menufocusimage(+/-N) etc.
-    In the skin '+N' is the slot on the left, i.e. the entry BEFORE the focus."""
+    """The home menu with its sub menus. How a level looks is up to the skin:
+    a ring (focused entry in the middle, two neighbours on each side, drawn via
+    #menufocusimage(+/-N) placeholders; '+N' is the slot on the left, i.e. the
+    entry BEFORE the focus) or a vertical list drawn by the Menu control itself."""
 
     def __init__(self, skin, items, on_ok=None, on_change=None):
         self.skin, self.key = skin, 'home'
-        self.items, self.index = items, 0
+        self.all_items = items
         self.on_ok, self.on_change = on_ok, on_change
         self.lists, self.focus, self.values = {}, None, {}
+        self.stack = []
+        self.items, self.index, self.window_key = [], 0, 'home'
+        self._open_level('0')
+
+    def _open_level(self, parent, index=0):
+        self.parent = parent
+        self.items = [e for e in self.all_items if e['parent'] == parent] or \
+            [e for e in self.all_items if e['parent'] == '0']
+        self.index = min(index, len(self.items) - 1)
+        top = parent == '0' and skin_has(self.skin, 'homemain')
+        self.window_key = 'homemain' if top else 'home'
         self._update()
+
+    def can_go_up(self):
+        return bool(self.stack)
+
+    def go_up(self):
+        if self.stack:
+            parent, index = self.stack.pop()
+            self._open_level(parent, index)
+            return True
+        return False
 
     def _item(self, offset):
         return self.items[(self.index + offset) % len(self.items)]
 
     def _update(self):
-        values = {'currentwindow': 'Home Window'}
+        owner = next((e for e in self.all_items if e['id'] and e['id'] == self.parent), None)
+        values = {'currentwindow': owner['name'] if owner else 'Home Window'}
+        n = len(self.items)
         for offset in (-2, -1, 0, 1, 2):
             suffix = '' if offset == 0 else '%+d' % offset
+            if n < 5 and abs(offset) > n // 2:   # don't repeat entries of a short menu
+                values['menufocusimage' + suffix] = ''
+                values['menufocustext' + suffix] = ''
+                continue
             item = self._item(-offset)
             values['menufocusimage' + suffix] = self.skin.menu_icon(item.get('image', ''))
             values['menufocustext' + suffix] = item.get('display', item.get('text', ''))
         self.values = values
 
+    def is_list(self):
+        """True when the skin draws this level as a vertical list (then Up/Down move, else Left/Right)"""
+        window = self.skin.window(self.window_key)
+        for ctl in (window.controls if window else []):
+            if ctl.get('type', '').lower() == 'menu':
+                button = _sub(ctl, 'button')
+                return bool(button) and _rect(ctl).height() >= _num(button, 'height', 1e9) * 1.5
+        return False
+
     def handle(self, action):
-        if action in ('left', 'right'):
-            self.index = (self.index + (-1 if action == 'left' else 1)) % len(self.items)
+        if action in ('left', 'right', 'up', 'down'):
+            if (action in ('up', 'down')) != self.is_list():
+                return True
+            step = -1 if action in ('left', 'up') else 1
+            self.index = (self.index + step) % len(self.items)
             self._update()
             if self.on_change:
                 self.on_change(self.items[self.index])
             return True
-        if action == 'ok' and self.on_ok:
-            self.on_ok(self.items[self.index])
+        if action == 'ok':
+            item = self.items[self.index]
+            if (item.get('script') or '').lower() == 'previouswindow':
+                return self.go_up() or True
+            if item.get('id') and any(e['parent'] == item['id'] for e in self.all_items):
+                self.stack.append((self.parent, self.index))
+                self._open_level(item['id'])
+                return True
+            if self.on_ok:
+                self.on_ok(item)
             return True
-        return action in ('up', 'down')
+        return False
+
+
+def skin_has(skin, key):
+    return skin.window(key) is not None
 
 
 def find_skins(root_folder):
@@ -808,7 +882,7 @@ class OSDOverlay(QWidget):
                 self._paint_notice(painter)
             elif key == 'screen':
                 if self.screen is not None:
-                    render(painter, self.skin, self.screen.key, {**self.values, **self.screen.values},
+                    render(painter, self.skin, getattr(self.screen, 'window_key', self.screen.key), {**self.values, **self.screen.values},
                            self.width(), self.height(), self.screen)
             else:
                 render(painter, self.skin, key, self.values, self.width(), self.height())
