@@ -2440,6 +2440,8 @@ class TVHeadendClient(QMainWindow):
         slider.valueChanged.connect(apply)
         slider.setValue(original)
         apply(original)
+        dialog.adjustSize()
+        dialog.move(self.mapToGlobal(QPoint(max(0, (self.width() - dialog.width()) // 2), 70)))
         if dialog.exec_() == QDialog.Accepted:
             self.save_config()
         else:
@@ -2789,8 +2791,8 @@ class TVHeadendClient(QMainWindow):
         if list_id is None:
             return
         screen.lists[list_id].set_items(rows, 1 if rows and rows[0]['data'].get('up') and len(rows) > 1 else 0)
-        screen.values = {'itemcount': str(len([r for r in rows if not r['data'].get('up')])),
-                         'channelname': os.path.basename(os.path.normpath(screen.folder))}
+        screen.values = dict(osdskin.NO_TV_INFO,
+                             itemcount=str(len([r for r in rows if not r['data'].get('up')])))
 
     def _osd_file_ok(self, list_id, item):
         if not item:
