@@ -74,6 +74,11 @@ class OSDWindow:
         self.default_focus = (root.get('default') or '').strip()
         self.controls = []
         self.has_bg = (root.get('hasbg') or '').strip().lower() == 'true'
+        # <Backdrop DefaultFile=.. DefaultDifuseColor=..>: full-screen picture behind the window
+        # ('-' or empty = none); None = the window has no such element
+        backdrop = root.find('Backdrop')
+        self.backdrop = None if backdrop is None else (backdrop.get('DefaultFile') or '').strip()
+        self.backdrop_color = (backdrop.get('DefaultDifuseColor') or 'FFFFFFFF') if backdrop is not None else 'FFFFFFFF'
         items = root.find('items')
         self.controls = [_parse_control(item) for item in (items if items is not None else [])]
 
@@ -429,10 +434,15 @@ def render(painter, skin, key, values, width, height, screen=None):
     painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
                            QPainter.SmoothPixmapTransform)
     painter.scale(width / skin.size_x, height / skin.size_y)
-    if screen is not None and window.has_bg:
-        backdrop = skin.pixmap('background.png')
+    if screen is not None:
+        # the window's own <Backdrop>; windows without one use background.png when hasbg="true"
+        name = window.backdrop if window.backdrop is not None else ('background.png' if window.has_bg else '')
+        backdrop = skin.pixmap(name) if name and name != '-' else None
         if backdrop is not None:
+            painter.save()
+            painter.setOpacity(painter.opacity() * parse_color(window.backdrop_color, 'FFFFFFFF').alphaF())
             painter.drawPixmap(QRectF(0, 0, skin.size_x, skin.size_y), backdrop, QRectF(backdrop.rect()))
+            painter.restore()
     for ctl in window.controls:
         if _hidden(ctl, values):
             continue
@@ -682,6 +692,11 @@ def load_menu_entries(windowdef_path=None):
     return entries
 
 
+# DVBViewer shows no now/next or channel text in menu windows, so those labels stay empty
+NO_TV_INFO = {'channelname': '', 'channelnr': '', 'tv.now.start': '', 'tv.now.title': '',
+              'tv.now.remain': '', 'tv.now.description': '', 'tv.next.start': '', 'tv.next.title': ''}
+
+
 class OSDMenuScreen:
     """The home menu with its sub menus. How a level looks is up to the skin:
     a ring (focused entry in the middle, two neighbours on each side, drawn via
@@ -721,7 +736,7 @@ class OSDMenuScreen:
 
     def _update(self):
         owner = next((e for e in self.all_items if e['id'] and e['id'] == self.parent), None)
-        values = {'currentwindow': owner['name'] if owner else 'Home Window'}
+        values = dict(NO_TV_INFO, currentwindow=owner['name'] if owner else 'Home Window')
         n = len(self.items)
         for offset in (-2, -1, 0, 1, 2):
             suffix = '' if offset == 0 else '%+d' % offset
@@ -790,7 +805,7 @@ class OSDOverlay(QWidget):
     and the window hides when no layer is left."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput |
                          Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
