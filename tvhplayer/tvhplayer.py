@@ -1171,8 +1171,24 @@ def parse_remote_file(path):
 
 MENU_TEXT_DE = {'Program': 'Sender-EPG', 'Channels': 'Senderliste', 'CAM Menu': 'CAM Menü',
                 'Recordings': 'Aufnahmen', 'Timer': 'Timer', 'Clock': 'Uhr', 'TimeLine': 'Timeline',
-                "What's now": 'Jetzt läuft', 'theMovies': 'Videos', 'Kodi': 'Kodi'}
-MENU_TEXT_EN = {'Program': 'Channel EPG', 'Channels': 'Channels', 'CAM Menu': 'CAM Menu',
+                "What's now": 'EPG zur Zeit', 'theMovies': 'Videos', 'Kodi': 'Kodi',
+                'Main Menu': 'Hauptmenü', 'Teletext': 'Teletext', 'htpcHome': 'Media Center',
+                'Preview': 'Bild in Bild', 'Mosaic Preview': 'Mosaik-Vorschau', 'System': 'System',
+                'thePictures': 'Bilder', 'theUPnP': 'UPnP', 'theMusic': 'Musik',
+                'thePlaylist': 'Wiedergabeliste', 'theNews': 'Nachrichten', 'theWeather': 'Wetter',
+                'theComputer': 'Computer', 'Back': 'Zurück', 'theInfos': 'Infos',
+                'theSettings': 'Einstellungen', 'Exit': 'Beenden', 'Standby': 'Standby',
+                'Hibernate': 'Ruhezustand', 'Power Off': 'Ausschalten', 'Reboot': 'Neustart',
+                'Disable AV': 'Bild/Ton aus', 'Media Server': 'Media Server', 'EPG-Search': 'EPG-Suche',
+                'Favourites': 'Favoriten', 'Color, Brightness': 'Farbe, Helligkeit',
+                'Aspect Ratio': 'Seitenverhältnis', 'Zoom': 'Zoom', 'Music Settings': 'Musik-Einstellungen',
+                'Video Settings': 'Video-Einstellungen', 'Equalizer': 'Equalizer',
+                'Picture Settings': 'Bild-Einstellungen', 'Unlock HTPC-Mode': 'HTPC-Modus entsperren'}
+MENU_TEXT_EN = {'Main Menu': 'Main Menu', 'htpcHome': 'Media Center', 'thePictures': 'Pictures',
+                'theUPnP': 'UPnP', 'theMusic': 'Music', 'thePlaylist': 'Playlist', 'theNews': 'News',
+                'theWeather': 'Weather', 'theComputer': 'Computer', 'theInfos': 'Info',
+                'theSettings': 'Settings', 'Preview': 'Picture in Picture',
+                'Program': 'Channel EPG', 'Channels': 'Channels', 'CAM Menu': 'CAM Menu',
                 'Recordings': 'Recordings', 'Timer': 'Timer', 'Clock': 'Clock', 'TimeLine': 'Timeline',
                 "What's now": "What's on now", 'theMovies': 'Videos', 'Kodi': 'Kodi'}
 
@@ -2609,6 +2625,7 @@ class TVHeadendClient(QMainWindow):
             for entry in entries:
                 entry['display'] = names.get(entry['text'], entry['text'])
             self.osd_screen = osdskin.OSDMenuScreen(self.osd_skin, entries, on_ok=self._osd_menu_ok)
+            self._log_missing_icons()
         if self.osd_overlay is None:
             self.osd_overlay = osdskin.OSDOverlay(self)
         self.osd_overlay.screen = self.osd_screen
@@ -2636,7 +2653,12 @@ class TVHeadendClient(QMainWindow):
         if self.osd_screen is None:
             return
         screen = self.osd_screen
-        if action == 'back' and getattr(screen, 'folder', None) and \
+        if action == 'back' and getattr(screen, 'can_go_up', None) and screen.can_go_up():
+            screen.go_up()
+            self._touch_osd()
+            if self.osd_overlay is not None:
+                self.osd_overlay.update()
+        elif action == 'back' and getattr(screen, 'folder', None) and \
                 os.path.normpath(screen.folder) != os.path.normpath(screen.root):
             screen.folder = os.path.dirname(os.path.normpath(screen.folder))
             self._osd_fill_files()
@@ -2714,6 +2736,17 @@ class TVHeadendClient(QMainWindow):
             self.show_osd('clock', 5000)
         else:
             self._osd_notice(f"{entry.get('display', entry.get('text', ''))}: not available yet")
+
+    def _log_missing_icons(self):
+        """Note in tvhviewer.log which menu icons the active skin doesn't have"""
+        missing = sorted(getattr(self.osd_skin, 'missing_icons', ()))
+        if missing and getattr(self, '_crash_log', None) and missing != getattr(self, '_logged_missing', None):
+            self._logged_missing = missing
+            try:
+                self._crash_log.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] OSD skin '{self.config.get('osd_skin')}' "
+                                      f"({self.osd_skin.folder}): icons not found: {', '.join(missing)}\n")
+            except Exception:
+                pass
 
     def media_folder(self, key):
         """Folder for 'recordings' or 'videos' ('' if unset / missing)"""
