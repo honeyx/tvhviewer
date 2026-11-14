@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QActionGroup, QAbstractItemView, QStackedWidget, QWidgetAction, QKeySequenceEdit
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QRectF, QCoreApplication, QDateTime, pyqtSignal, QThread, QObject, QPoint, QUrl, QLocale
-from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics, QDesktopServices
+from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QKeySequence, QPalette, QBrush, QPen, QFont, QFontMetrics, QDesktopServices
 
 # Optional OSD skin support (separate module; the app works without it)
 try:
@@ -1193,11 +1193,21 @@ MENU_TEXT_EN = {'Main Menu': 'Main Menu', 'htpcHome': 'Media Center', 'thePictur
                 "What's now": "What's on now", 'theMovies': 'Videos', 'Kodi': 'Kodi'}
 
 
-MEDIA_EXTENSIONS = ('.ts', '.m2ts', '.mts', '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.mpg', '.mpeg',
-                    '.wmv', '.flv', '.webm', '.vob', '.divx', '.mp3', '.flac', '.m4a', '.ogg')
+VIDEO_EXTENSIONS = ('.ts', '.m2ts', '.mts', '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.mpg', '.mpeg',
+                    '.wmv', '.flv', '.webm', '.vob', '.divx')
+AUDIO_EXTENSIONS = ('.mp3', '.flac', '.m4a', '.ogg', '.wav', '.aac', '.wma', '.opus')
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS + AUDIO_EXTENSIONS
+# OSD file windows: key -> (config key of the folder, title, file types)
+FILE_WINDOWS = {
+    'videos': ('video_path', 'Video Folder', VIDEO_EXTENSIONS),
+    'recordings': ('recordings_path', 'Recordings Folder', VIDEO_EXTENSIONS),
+    'pictures': ('pictures_path', 'Pictures Folder', IMAGE_EXTENSIONS),
+    'music': ('music_path', 'Music Folder', AUDIO_EXTENSIONS),
+}
 
 
-def list_media_folder(folder, root, newest_first=False):
+def list_media_folder(folder, root, newest_first=False, extensions=MEDIA_EXTENSIONS):
     """OSD file list rows for a folder: '..' (below the root), sub-folders, playable files"""
     rows = []
     if os.path.normpath(folder) != os.path.normpath(root):
@@ -1211,7 +1221,7 @@ def list_media_folder(folder, root, newest_first=False):
             try:
                 if entry.is_dir():
                     dirs.append(entry)
-                elif entry.name.lower().endswith(MEDIA_EXTENSIONS):
+                elif entry.name.lower().endswith(extensions):
                     files.append(entry)
             except OSError:
                 continue
@@ -1234,6 +1244,45 @@ def list_media_folder(folder, root, newest_first=False):
                          f"{size / 1024:.1f} GB" if size >= 1024 else f"{size:.0f} MB"),
                      'label2': '', 'label3': '', 'icon': '', 'data': {'file': e.path}})
     return rows
+
+
+class PictureDialog(QDialog):
+    """Plain picture viewer: Left/Right = previous/next picture of the folder, Esc closes"""
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pictures")
+        self.resize(900, 650)
+        self.setStyleSheet("background: black; color: white;")
+        folder = os.path.dirname(path)
+        self._files = [os.path.join(folder, n) for n in sorted(os.listdir(folder), key=str.lower)
+                       if n.lower().endswith(IMAGE_EXTENSIONS)] if os.path.isdir(folder) else [path]
+        self._index = self._files.index(path) if path in self._files else 0
+        self._label = QLabel(self)
+        self._label.setAlignment(Qt.AlignCenter)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._label)
+        self._show()
+
+    def _show(self):
+        pix = QPixmap(self._files[self._index])
+        self._label.setPixmap(pix.scaled(self._label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.setWindowTitle(f"{os.path.basename(self._files[self._index])}  ({self._index + 1}/{len(self._files)})")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._show()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_PageUp):
+            self._index = (self._index - 1) % len(self._files)
+            self._show()
+        elif event.key() in (Qt.Key_Right, Qt.Key_Down, Qt.Key_PageDown, Qt.Key_Space):
+            self._index = (self._index + 1) % len(self._files)
+            self._show()
+        else:
+            super().keyPressEvent(event)
 
 
 class ChannelPickerDialog(QDialog):
@@ -1702,6 +1751,11 @@ class TVHeadendClient(QMainWindow):
         play_vid_action.triggered.connect(lambda: self.open_media_browser('videos'))
         file_menu.addAction(play_vid_action)
 
+        for key, label in (('music', "Play Music..."), ('pictures', "Show Pictures...")):
+            action = QAction(label, self)
+            action.triggered.connect(lambda checked=False, k=key: self.open_media_browser(k))
+            file_menu.addAction(action)
+
         # Add User Guide action to Help menu
         user_guide_action = QAction("User Guide", self)
         user_guide_action.triggered.connect(self.show_user_guide)
@@ -1804,6 +1858,11 @@ class TVHeadendClient(QMainWindow):
         rec_folder_action = QAction("Recordings Folder...", self)
         rec_folder_action.triggered.connect(lambda: self.set_media_folder('recordings'))
         settings_menu.addAction(rec_folder_action)
+
+        for key, label in (('pictures', "Pictures Folder..."), ('music', "Music Folder...")):
+            action = QAction(label, self)
+            action.triggered.connect(lambda checked=False, k=key: self.set_media_folder(k))
+            settings_menu.addAction(action)
 
         keys_action = QAction("Keyboard / Remote Keys...", self)
         keys_action.triggered.connect(self.edit_keymap)
@@ -2589,14 +2648,33 @@ class TVHeadendClient(QMainWindow):
         if self.osd_screen is not None and self._osd_mode == mode:
             self.close_osd_window()      # same key again = toggle off
             return
-        if key in ('recordings', 'videos'):
+        if key in FILE_WINDOWS:
             root = self.media_folder(key)
             if not root:
-                self._osd_notice("Set the folder first (Settings -> %s Folder...)" %
-                                 ('Recordings' if key == 'recordings' else 'Video'))
+                self._osd_notice("Set the folder first (Settings -> %s...)" % FILE_WINDOWS[key][1])
                 return
         self._osd_mode = mode
-        if key in ('recordings', 'videos'):
+        if key == 'timeline':
+            if not self.channels:
+                self.statusbar.showMessage("No channels loaded yet")
+                self._osd_mode = None
+                return
+            cache = self.epg_cache['events_by_channel']
+            current = (self.current_channel_data or {}).get('uuid', '')
+            self.osd_screen = osdskin.OSDTimeline(self.osd_skin, self.channels,
+                                                  lambda c: cache.get(c.get('uuid'), []), current,
+                                                  on_ok=self._osd_timeline_ok)
+        elif key == 'epgchannel':
+            if not self.channels:
+                self.statusbar.showMessage("No channels loaded yet")
+                self._osd_mode = None
+                return
+            current = (self.current_channel_data or {}).get('uuid')
+            screen = osdskin.OSDScreen(self.osd_skin, 'epgchannel', on_ok=self._osd_epg_ok, on_change=self._osd_epg_changed)
+            screen.channel_index = next((i for i, c in enumerate(self.channels) if c.get('uuid') == current), 0)
+            self.osd_screen = screen
+            self._osd_fill_epg()
+        elif key in FILE_WINDOWS:
             screen = osdskin.OSDScreen(self.osd_skin, key, on_ok=self._osd_file_ok)
             screen.root = screen.folder = root
             self.osd_screen = screen
@@ -2644,6 +2722,10 @@ class TVHeadendClient(QMainWindow):
 
     def close_osd_window(self):
         self._osd_idle.stop()
+        self._picture_index = None
+        if self.osd_overlay is not None:
+            self.osd_overlay.picture = None
+            self.osd_overlay.hide_layer('picture')
         self._osd_mode = None
         self.osd_screen = None
         if self.osd_overlay is not None:
@@ -2655,6 +2737,27 @@ class TVHeadendClient(QMainWindow):
         if self.osd_screen is None:
             return
         screen = self.osd_screen
+        if getattr(self, '_picture_index', None) is not None:       # looking at a picture
+            if action in ('left', 'up', 'right', 'down'):
+                step = -1 if action in ('left', 'up') else 1
+                self._picture_index = (self._picture_index + step) % len(self._picture_list)
+                self._draw_picture()
+            else:
+                self.close_picture()
+            return
+        if screen.key == 'epgchannel' and action in ('left', 'right'):
+            self._osd_epg_channel(-1 if action == 'left' else 1)
+            self._touch_osd()
+            if self.osd_overlay is not None:
+                self.osd_overlay.update()
+            return
+        if screen.key == 'epgchannel' and action in ('up', 'down', 'pageup', 'pagedown'):
+            screen.handle(action)
+            self._osd_epg_values()
+            self._touch_osd()
+            if self.osd_overlay is not None:
+                self.osd_overlay.update()
+            return
         if action == 'back' and getattr(screen, 'can_go_up', None) and screen.can_go_up():
             screen.go_up()
             self._touch_osd()
@@ -2730,6 +2833,14 @@ class TVHeadendClient(QMainWindow):
             self.launch_kodi()
         elif entry_id == '1':                 # Channel Window -> skinned channel list
             QTimer.singleShot(0, lambda: self.open_osd_window('channels'))
+        elif entry_id == '600':               # Timeline
+            QTimer.singleShot(0, lambda: self.open_osd_window('timeline'))
+        elif entry_id == '2':                 # Channel EPG
+            QTimer.singleShot(0, lambda: self.open_osd_window('epgchannel'))
+        elif entry_id == '20':                # Pictures
+            QTimer.singleShot(0, lambda: self.open_osd_window('pictures'))
+        elif entry_id == '5':                 # Music
+            QTimer.singleShot(0, lambda: self.open_osd_window('music'))
         elif entry_id == '603':               # Recordings
             QTimer.singleShot(0, lambda: self.open_osd_window('recordings'))
         elif entry_id == '6':                 # Movies / Videos
@@ -2750,22 +2861,97 @@ class TVHeadendClient(QMainWindow):
             except Exception:
                 pass
 
+    def _osd_fill_epg(self):
+        """Channel EPG window: the coming programmes of the channel being looked at"""
+        screen = self.osd_screen
+        channel = self.channels[screen.channel_index]
+        now_ts = time.time()
+        locale = QLocale()
+        items = []
+        for ev in self.epg_cache['events_by_channel'].get(channel.get('uuid'), []):
+            if ev.get('stop', 0) <= now_ts:
+                continue
+            start = datetime.fromtimestamp(ev['start'])
+            day = locale.dayName(start.isoweekday(), QLocale.ShortFormat)
+            items.append({'label1': f"{day}  {start:%H:%M}  {_epg_text(ev.get('title'), 'No title')}",
+                          'label2': '', 'label3': '', 'icon': '', 'data': ev})
+        list_id = next(iter(screen.lists), None)
+        if list_id is not None:
+            screen.lists[list_id].set_items(items, 0)
+        screen.epg_channel = channel
+        self._osd_epg_values()
+
+    def _osd_epg_values(self):
+        screen = self.osd_screen
+        lst = screen.lists[next(iter(screen.lists))] if screen.lists else None
+        n = len(lst.items) if lst else 0
+        genre = ''
+        if lst and n:
+            genre = _epg_text(lst.items[lst.selected]['data'].get('genre', ''))
+        screen.values = dict(osdskin.NO_TV_INFO, **{
+            'epg.channelname': screen.epg_channel.get('name', ''), 'epg.genre': genre, 'epg.logo': '',
+            'itemcount': f"{lst.selected + 1}/{n}" if n else '0'})
+
+    def _osd_timeline_ok(self, channel):
+        self.close_osd_window()
+        self.play_channel_by_data(channel)
+
+    def _osd_epg_changed(self, list_id, item):
+        self._osd_epg_values()
+
+    def _osd_epg_ok(self, list_id, item):
+        channel = self.osd_screen.epg_channel
+        self.close_osd_window()
+        self.play_channel_by_data(channel)
+
+    def _osd_epg_channel(self, delta):
+        screen = self.osd_screen
+        screen.channel_index = (screen.channel_index + delta) % len(self.channels)
+        self._osd_fill_epg()
+
     def media_folder(self, key):
-        """Folder for 'recordings' or 'videos' ('' if unset / missing)"""
-        if key == 'recordings':
-            path = self.config.get('recordings_path') or self.config.get('recording_path', '')
-        else:
-            path = self.config.get('video_path', '')
+        """Folder of a file window ('' if unset or not reachable right now)"""
+        path = self.config.get(FILE_WINDOWS[key][0], '')
+        if key == 'recordings' and not path:
+            path = self.config.get('recording_path', '')
         return path if path and os.path.isdir(path) else ''
 
     def set_media_folder(self, key):
-        title = "Recordings Folder" if key == 'recordings' else "Video Folder"
-        start = self.media_folder(key) or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(self, title, start, QFileDialog.DontUseNativeDialog)
-        if chosen:
-            self.config['recordings_path' if key == 'recordings' else 'video_path'] = chosen
-            self.save_config()
-            self.statusbar.showMessage(f"{title}: {chosen}")
+        """Dialog for a folder: typed or browsed; network paths work too"""
+        cfg_key, title, _ = FILE_WINDOWS[key]
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(560, 150)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Folder (also a network path, e.g. \\\\server\\share\\videos on Windows,\n"
+                                "smb://... in the file manager and then its mounted path, or /mnt/nas/videos):"))
+        row = QHBoxLayout()
+        edit = QLineEdit(self.config.get(cfg_key, ''))
+        browse = QPushButton("Browse...")
+
+        def _browse():
+            start = edit.text().strip() if os.path.isdir(edit.text().strip()) else str(Path.home())
+            chosen = QFileDialog.getExistingDirectory(dialog, title, start, QFileDialog.DontUseNativeDialog)
+            if chosen:
+                edit.setText(chosen)
+        browse.clicked.connect(_browse)
+        row.addWidget(edit)
+        row.addWidget(browse)
+        layout.addLayout(row)
+        box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.accepted.connect(dialog.accept)
+        box.rejected.connect(dialog.reject)
+        layout.addWidget(box)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        path = edit.text().strip()
+        if path and not os.path.isdir(path):
+            answer = QMessageBox.question(self, title, f"'{path}' can't be reached right now. Save it anyway?")
+            if answer != QMessageBox.Yes:
+                return
+        self.config[cfg_key] = path
+        self.save_config()
+        self.statusbar.showMessage(f"{title}: {path or '(not set)'}")
 
     def open_media_browser(self, key):
         """File menu: skinned list when a skin is on, plain file dialog otherwise"""
@@ -2778,15 +2964,16 @@ class TVHeadendClient(QMainWindow):
             folder = self.media_folder(key)
             if not folder:
                 return
-        filt = "Media (%s);;All Files (*)" % ' '.join('*' + e for e in MEDIA_EXTENSIONS)
+        filt = "Files (%s);;All Files (*)" % ' '.join('*' + e for e in FILE_WINDOWS[key][2])
         chosen, _ = QFileDialog.getOpenFileName(self, "Play", folder, filt,
                                                 options=QFileDialog.DontUseNativeDialog)
         if chosen:
-            self.play_media_file(chosen)
+            self.open_media_file(key, chosen)
 
     def _osd_fill_files(self):
         screen = self.osd_screen
-        rows = list_media_folder(screen.folder, screen.root, newest_first=(screen.key == 'recordings'))
+        rows = list_media_folder(screen.folder, screen.root, newest_first=(screen.key == 'recordings'),
+                                 extensions=FILE_WINDOWS[screen.key][2])
         list_id = next(iter(screen.lists), None)
         if list_id is None:
             return
@@ -2802,8 +2989,47 @@ class TVHeadendClient(QMainWindow):
             self.osd_screen.folder = data['dir']
             self._osd_fill_files()
         elif 'file' in data:
-            self.close_osd_window()
-            self.play_media_file(data['file'])
+            if self.osd_screen.key == 'pictures':
+                self.show_picture(data['file'])
+            else:
+                self.close_osd_window()
+                self.open_media_file(self.osd_screen.key if self.osd_screen else 'videos', data['file'])
+
+    def open_media_file(self, key, path):
+        if key == 'pictures':
+            PictureDialog(path, self).exec_()      # File menu: plain viewer, no skin needed
+        else:
+            self.play_media_file(path)
+
+    # -- picture viewer (a layer on the OSD overlay) ---------------------------
+    def show_picture(self, path):
+        pictures = [os.path.join(os.path.dirname(path), n) for n in sorted(os.listdir(os.path.dirname(path)), key=str.lower)
+                    if n.lower().endswith(IMAGE_EXTENSIONS)] if os.path.isdir(os.path.dirname(path)) else [path]
+        self._picture_list = pictures or [path]
+        self._picture_index = self._picture_list.index(path) if path in self._picture_list else 0
+        if self.osd_overlay is None:
+            self.osd_overlay = osdskin.OSDOverlay(self)
+        self._draw_picture()
+
+    def _draw_picture(self):
+        path = self._picture_list[self._picture_index]
+        self.osd_overlay.picture = QPixmap(path)
+        area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+        self.osd_overlay.show_layer(self.osd_skin or object(), 'picture', {}, area, None)
+        self.osd_overlay.hide_layer('screen') if 'screen' in self.osd_overlay.layers else None
+        self.statusbar.showMessage(f"{os.path.basename(path)}  ({self._picture_index + 1}/{len(self._picture_list)})")
+        self.apply_osd_input_state()
+        self._touch_osd()
+
+    def close_picture(self):
+        self._picture_index = None
+        if self.osd_overlay is not None:
+            self.osd_overlay.picture = None
+            self.osd_overlay.hide_layer('picture')
+            if self.osd_screen is not None:       # back to the file list
+                area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
+                self.osd_overlay.show_layer(self.osd_skin, 'screen', self.osd_values(), area, None)
+        self.apply_osd_input_state()
 
     def play_media_file(self, path):
         """Play a recording / video file in the main player"""
@@ -2828,10 +3054,9 @@ class TVHeadendClient(QMainWindow):
             self.play_channel_by_data(channel)
 
     def osd_epg_not_ready(self):
-        """Ctrl+G ('OSD EPG'): with a skin on, say it's not there yet (E still opens the plain guide);
-        without a skin keep opening the plain guide."""
-        if self.osd_skin is not None:
-            self._osd_notice("OSD EPG: not available yet (E opens the program guide)")
+        """Ctrl+G ('OSD EPG'): the skinned channel EPG; without a skin the plain program guide"""
+        if self.osd_skin is not None and self.osd_skin.window('epgchannel') is not None:
+            self.open_osd_window('epgchannel')
         else:
             self.show_epg_grid()
 
