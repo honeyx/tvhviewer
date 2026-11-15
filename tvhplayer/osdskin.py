@@ -31,7 +31,7 @@ WINDOW_FILES = {   # every entry: candidate file names, first existing one wins 
     'pictures': ('mypics.xml',),
     'music': ('mymusicfiles.xml',),
     'epgchannel': ('myepgchannel.xml',),
-    'timeline': ('mytvguide.xml',),
+    'timeline': ('mytvguide.xml',), 'timer': ('myTimer.xml',),
 }
 
 _TOKEN = re.compile(r'#[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_:]+)*(?:[+-]\d)?')
@@ -291,10 +291,30 @@ def _hidden(ctl, values):
 # table. These are the ones used by the colour-button legend of the list windows.
 UI_STRINGS = {
     'de': {'901': 'TV / Radio / Fav', '902': 'EPG anzeigen', '903': 'Favoriten-Editor', '904': 'Kontext', '3': 'Videos',
+           '136': 'Wiedergabeliste', '341': 'DVD', '654': 'Auswerfen',
            },
     'en': {'901': 'TV / Radio / Fav', '902': 'Show EPG', '903': 'Favourites editor', '904': 'Context', '3': 'Videos',
+           '136': 'Playlist', '341': 'DVD', '654': 'Eject',
            },
 }
+# host-supplied captions of file-window buttons (#Lang.xxx placeholders and the view/sort buttons)
+LANG_STRINGS = {'#lang.addtoplaylist': 'Add Playlist', '#lang.directoryup': 'Dir. back', '#lang.context': 'Context Menu',
+                'view-as button': 'Listenansicht', 'sort button': 'Name'}
+
+
+def default_pills(skin, ctl):
+    """(focus, nofocus) image controls of a list/menu. A sub-image without any texture means the
+    host's default pill (lstbtn_*.png, when the skin has them); a texture of '-' means none."""
+    focus, nofocus = _sub(ctl, 'imgfocus'), _sub(ctl, 'imgnofocus')
+    if focus is None and nofocus is None and skin.pixmap('lstbtn_focus.png'):
+        focus = {'texture': ''}                    # no image sub-controls at all: host default pills
+    if focus is not None and not focus.get('texture') and skin.pixmap('lstbtn_focus.png'):
+        focus = dict(focus, texture='lstbtn_focus.png')
+        if nofocus is None and skin.pixmap('lstbtn_nofocus.png'):
+            nofocus = {'texture': 'lstbtn_nofocus.png'}
+    if nofocus is not None and not nofocus.get('texture') and skin.pixmap('lstbtn_nofocus.png'):
+        nofocus = dict(nofocus, texture='lstbtn_nofocus.png')
+    return focus, nofocus
 _language = 'en'
 
 
@@ -371,21 +391,39 @@ def _draw_label(painter, skin, ctl, values, rect):
 def _draw_button(painter, skin, ctl, values, rect):
     """A skin Button in its unfocused look: its image, plus its label"""
     image = _sub(ctl, 'imgnofocus')
+    host_pill = False
+    if image is None and _sub(ctl, 'imgfocus') is None and ctl.get('visible', 'true').lower() != 'false' \
+            and skin.pixmap('lstbtn_nofocus.png') and _sub(ctl, 'buttonlabel') is not None:
+        image, host_pill = {'texture': 'lstbtn_nofocus.png'}, True
+    elif image is not None and not image.get('texture') and skin.pixmap('lstbtn_nofocus.png'):
+        image, host_pill = dict(image, texture='lstbtn_nofocus.png'), True      # host default pill
+    elif image is None and _sub(ctl, 'imgfocus') is not None and not _sub(ctl, 'imgfocus').get('texture') \
+            and skin.pixmap('lstbtn_nofocus.png'):
+        image, host_pill = {'texture': 'lstbtn_nofocus.png'}, True
     if image:
         _draw_image(painter, skin, dict(image), values, QRectF(rect))
     label = _sub(ctl, 'buttonlabel')
-    # Only labels that are language-table ids are shown; plain-text captions
-    # ('Previous Group', 'Next Group', ...) are just names for the skin author.
-    if label and (label.get('label') or '').strip().isdigit():
-        text = ui_string(label.get('label'))
-        if text:
-            lab = dict(label)
-            lab['label'] = text
-            lab['textcolor'] = lab.get('textcolor') or lab.get('disabledcolor') or 'FF000000'
-            ox = _num(ctl, 'textoffsetx', 0)
-            lab_rect = QRectF(rect.x() + ox, rect.y(), _num(label, 'width', rect.width() - ox),
-                              _num(label, 'height', rect.height()))
-            _draw_label(painter, skin, lab, values, lab_rect)
+    if not label:
+        return
+    caption = (label.get('label') or '').strip()
+    text = ''
+    if caption.isdigit():
+        text = ui_string(caption)
+    elif caption.lower() in LANG_STRINGS:
+        text = LANG_STRINGS[caption.lower()]
+    elif not caption or caption == '-':
+        text = LANG_STRINGS.get((ctl.get('description') or '').lower(), '')
+    elif host_pill:
+        text = caption      # plain captions are real texts only on buttons showing the host pill
+    if text:
+        lab = dict(label)
+        lab['label'] = text
+        lab['textcolor'] = lab.get('textcolor') or lab.get('disabledcolor') or ('FFFFFFFF' if host_pill else 'FF000000')
+        if host_pill and not lab.get('font'):
+            lab['font'] = 'font14'
+        ox = _num(ctl, 'textoffsetx', 0) or (30 if host_pill else 0)
+        lab_rect = QRectF(rect.x() + ox, rect.y(), max(10.0, rect.width() - ox - 2), rect.height())
+        _draw_label(painter, skin, lab, values, lab_rect)
 
 
 def _draw_group_banner(painter, skin, ctl, screen, values, window):
@@ -573,7 +611,7 @@ def _draw_list(painter, skin, ctl, lst, focused):
     item_h = _num(ctl, 'itemheight', 40) or 40
     space = _num(ctl, 'space', 0)
     step = item_h + space
-    focus_img, nofocus_img = _sub(ctl, 'imgfocus'), _sub(ctl, 'imgnofocus')
+    focus_img, nofocus_img = default_pills(skin, ctl)
     painter.save()
     painter.setClipRect(rect)
     rows = lst.visible_rows(step)
@@ -615,6 +653,12 @@ def _draw_list(painter, skin, ctl, lst, focused):
             single_line = item_h <= font.pixelSize() * 2.2
             has_oy = (oy_key in ctl) and not (single_line and n < 3)
             oy = _num(ctl, oy_key, 0)
+            if not single_line and not _num(ctl, 'textoffsety', 0) and not _num(ctl, 'textoffsety3', 0):
+                # tall rows without explicit offsets: title on top, description wrapped below it
+                if n == 2 and 'textoffsetx2' not in ctl:
+                    continue                      # no column of its own: the host leaves it out
+                has_oy = True
+                oy = 0 if n == 1 else QFontMetrics(skin.qfont(ctl.get('font'))).height() + 2
             color = ctl.get(('selectedcolor' if highlighted else 'textcolor') + suffix) or \
                 ctl.get('selectedcolor' if highlighted else 'textcolor') or ('FF000000' if highlighted else 'FFFFFFFF')
             painter.setPen(parse_color(color))
@@ -994,6 +1038,22 @@ class OSDTimeline:
         return False
 
 
+def _timeline_cell_images(skin, state):
+    """(body strip, left cap, right cap) of a programme cell from the skin's arrow_*.png images:
+    state '' = normal, 'light' = running, 'selected' = chosen. None when the skin lacks them."""
+    cache = skin.__dict__.setdefault('_cell_images', {})
+    if state not in cache:
+        mid = ('_' + state) if state else ''
+        left, right = skin.pixmap('arrow%s_left.png' % mid), skin.pixmap('arrow%s_right.png' % mid)
+        if left is None or right is None:
+            cache[state] = None
+        else:
+            # the body repeats the inner edge column of the caps (a 1 px strip, stretched)
+            strip = left.copy(left.width() - 1, 0, 1, left.height())
+            cache[state] = (strip, left, right)
+    return cache[state]
+
+
 def _draw_timeline_grid(painter, skin, screen, panel):
     """Channels, time axis, programme cells and the 'now' marker inside the panel rectangle"""
     t = screen.template
@@ -1023,15 +1083,19 @@ def _draw_timeline_grid(painter, skin, screen, panel):
     for ctl, text in ((day_ctl, None), (span_ctl, '(2/4)')):
         if ctl is None:
             continue
+        tiny = _num(ctl, 'width') < 24            # arrow-only spin buttons: the text starts at the control
+        if text is not None and tiny:
+            continue                              # (no text shown for the interval)
         if text is None:
             a = time.localtime(t0)
             days = max(1, int((screen.last_stop() - screen.now) // 86400) + 1)
             d = max(1, int((screen._floor(t0) - screen._floor(screen.now - screen.now % 86400)) // 86400) + 1)
-            text = '(%d/%d) %s %d.%d' % (min(d, days), days, QLocale().dayName(a.tm_wday + 1, QLocale.ShortFormat),
-                                         a.tm_mday, a.tm_mon)
-        painter.setFont(skin.qfont(ctl.get('font')))
+            day = '%s %d.%d' % (QLocale().dayName(a.tm_wday + 1, QLocale.ShortFormat), a.tm_mday, a.tm_mon)
+            text = day if tiny else '(%d/%d) %s' % (min(d, days), days, day)
+        painter.setFont(skin.qfont(ctl.get('font') or (head or {}).get('font')))
         painter.setPen(parse_color(ctl.get('textcolor') or (head or {}).get('textcolor'), 'FFFFFFFF'))
-        box = QRectF(_num(ctl, 'x') + _num(ctl, 'width') + 4, _num(ctl, 'y'), 220, _num(ctl, 'height'))
+        x = _num(ctl, 'x') if tiny else _num(ctl, 'x') + _num(ctl, 'width') + 4
+        box = QRectF(x, _num(ctl, 'y'), 220, _num(ctl, 'height'))
         painter.drawText(box, int(Qt.AlignLeft | Qt.AlignVCenter), text)
 
     # rows
@@ -1058,44 +1122,60 @@ def _draw_timeline_grid(painter, skin, screen, panel):
             cell = QRectF(x0 + 1, top + 1, max(2.0, x1 - x0 - 2), row_h - 3)
             selected = ev is screen.event and r == middle
             running = ev['start'] <= screen.now < ev['stop']
-            grad = QLinearGradient(cell.topLeft(), cell.bottomLeft())
-            if selected:
-                grad.setColorAt(0, QColor(110, 170, 205)); grad.setColorAt(0.5, QColor(60, 120, 160))
-                grad.setColorAt(1, QColor(30, 75, 110))
-            elif running:
-                grad.setColorAt(0, QColor(120, 120, 120)); grad.setColorAt(0.5, QColor(70, 70, 70))
-                grad.setColorAt(1, QColor(35, 35, 35))
+            state = 'selected' if selected else ('light' if running else '')
+            imgs = _timeline_cell_images(skin, state)
+            size = min(row_h * 0.22, 16)
+            cap = cell.height() * 38.0 / 52.0 if imgs else size * 2
+            if imgs:
+                body, cap_l, cap_r = imgs
+                painter.drawPixmap(cell, body, QRectF(body.rect()))
+                if ev['start'] < t0 and cell.width() > cap * 1.5:
+                    painter.drawPixmap(QRectF(cell.left(), cell.top(), cap, cell.height()), cap_l, QRectF(cap_l.rect()))
+                if ev['stop'] > t1 and cell.width() > cap * 1.5:
+                    painter.drawPixmap(QRectF(cell.right() - cap, cell.top(), cap, cell.height()), cap_r, QRectF(cap_r.rect()))
             else:
-                grad.setColorAt(0, QColor(60, 60, 60)); grad.setColorAt(0.5, QColor(30, 30, 30))
-                grad.setColorAt(1, QColor(14, 14, 14))
-            painter.fillRect(cell, grad)
-            painter.setPen(QPen(QColor(150, 150, 150, 160), 1))
-            painter.drawLine(cell.topLeft(), cell.topRight())
-            painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
-            painter.drawRect(cell)
-            # arrows: the programme continues beyond the visible part
-            mid, size = cell.center().y(), min(row_h * 0.22, 16)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(210, 210, 210, 200))
-            if ev['start'] < t0:
-                painter.drawPolygon(QPolygonF([QPointF(cell.left() + 3, mid), QPointF(cell.left() + 3 + size, mid - size),
-                                               QPointF(cell.left() + 3 + size, mid + size)]))
-            if ev['stop'] > t1:
-                painter.drawPolygon(QPolygonF([QPointF(cell.right() - 3, mid), QPointF(cell.right() - 3 - size, mid - size),
-                                               QPointF(cell.right() - 3 - size, mid + size)]))
-            painter.setBrush(Qt.NoBrush)
+                grad = QLinearGradient(cell.topLeft(), cell.bottomLeft())
+                if selected:
+                    grad.setColorAt(0, QColor(110, 170, 205)); grad.setColorAt(0.5, QColor(60, 120, 160))
+                    grad.setColorAt(1, QColor(30, 75, 110))
+                elif running:
+                    grad.setColorAt(0, QColor(120, 120, 120)); grad.setColorAt(0.5, QColor(70, 70, 70))
+                    grad.setColorAt(1, QColor(35, 35, 35))
+                else:
+                    grad.setColorAt(0, QColor(60, 60, 60)); grad.setColorAt(0.5, QColor(30, 30, 30))
+                    grad.setColorAt(1, QColor(14, 14, 14))
+                painter.fillRect(cell, grad)
+                painter.setPen(QPen(QColor(150, 150, 150, 160), 1))
+                painter.drawLine(cell.topLeft(), cell.topRight())
+                painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
+                painter.drawRect(cell)
+                # arrows: the programme continues beyond the visible part
+                mid = cell.center().y()
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(210, 210, 210, 200))
+                if ev['start'] < t0:
+                    painter.drawPolygon(QPolygonF([QPointF(cell.left() + 3, mid), QPointF(cell.left() + 3 + size, mid - size),
+                                                   QPointF(cell.left() + 3 + size, mid + size)]))
+                if ev['stop'] > t1:
+                    painter.drawPolygon(QPolygonF([QPointF(cell.right() - 3, mid), QPointF(cell.right() - 3 - size, mid - size),
+                                                   QPointF(cell.right() - 3 - size, mid + size)]))
+                painter.setBrush(Qt.NoBrush)
             # texts
-            pad = 8 + (size + 4 if ev['start'] < t0 else 0)
-            width = cell.width() - pad - 8 - (size + 4 if ev['stop'] > t1 else 0)
+            cap_w = cap if imgs else size
+            pad = 8 + (cap_w + 4 if ev['start'] < t0 else 0)
+            width = cell.width() - pad - 8 - (cap_w + 4 if ev['stop'] > t1 else 0)
             if width < 14:
                 continue
             title = ev.get('title')
             if isinstance(title, dict):
                 title = next(iter(title.values()), '')
-            font = skin.qfont((title_t or {}).get('font'))
+            light = selected or running
+            cell_title = (title_t if light else (t('26', 'label') or title_t)) or {}
+            cell_genre = (t('23', 'label') if light else t('30', 'label')) or genre_t or cell_title
+            font = skin.qfont(title_t.get('font') if title_t else cell_title.get('font'))
             painter.setFont(font)
-            tcolor = (title_t or {}).get('textselectedcolor') if selected else (title_t or {}).get('textcolor')
-            painter.setPen(parse_color(tcolor or (title_t or {}).get('textcolor'), 'FFFFFFFF'))
+            tcolor = cell_title.get('textselectedcolor') if selected else cell_title.get('textcolor')
+            painter.setPen(parse_color(tcolor or cell_title.get('textcolor'), 'FFFFFFFF'))
             line = font.pixelSize() * 1.3
             has_genre = bool(genre_text(ev)) and row_h >= line * 2.2
             y = cell.top() + (cell.height() - line * (2 if has_genre else 1)) / 2
@@ -1103,7 +1183,7 @@ def _draw_timeline_grid(painter, skin, screen, panel):
             painter.drawText(QRectF(cell.left() + pad, y, width, line), int(Qt.AlignLeft | Qt.AlignVCenter),
                              fm.elidedText(title or '', Qt.ElideRight, int(width)))
             if has_genre:
-                painter.setPen(parse_color((genre_t or title_t or {}).get('textcolor'), 'FFDDDDDD'))
+                painter.setPen(parse_color(cell_genre.get('textcolor') or cell_title.get('textcolor'), 'FFDDDDDD'))
                 painter.drawText(QRectF(cell.left() + pad, y + line, width, line), int(Qt.AlignLeft | Qt.AlignVCenter),
                                  fm.elidedText(genre_text(ev), Qt.ElideRight, int(width)))
 
