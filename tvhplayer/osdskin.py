@@ -85,8 +85,20 @@ class OSDWindow:
         backdrop = root.find('Backdrop')
         self.backdrop = None if backdrop is None else (backdrop.get('DefaultFile') or '').strip()
         self.backdrop_color = (backdrop.get('DefaultDifuseColor') or 'FFFFFFFF') if backdrop is not None else 'FFFFFFFF'
+        # <videowindow x y width height>: where the live picture is shown (as a thumbnail) in this window
+        vw = root.find('videowindow')
+        self.videowindow = None
+        if vw is not None:
+            try:
+                self.videowindow = tuple(float(vw.get(k)) for k in ('x', 'y', 'width', 'height'))
+            except (TypeError, ValueError):
+                pass
         items = root.find('items')
         self.controls = [_parse_control(item) for item in (items if items is not None else [])]
+        # a full-screen id-1 Image without texture is the host's background picture, whatever hasbg says
+        if not self.has_bg and any(c.get('type', '').lower() == 'image' and c.get('id') == '1' and not c.get('texture')
+                                   and _num(c, 'width') >= 700 and _num(c, 'height') >= 500 for c in self.controls):
+            self.has_bg = True
 
 
 class OSDSkin:
@@ -282,7 +294,8 @@ def _hidden(ctl, values):
     flag = None
     if 'timeshift' in (ctl.get('label', '') + ' ' + ctl.get('description', '')).lower():
         flag = 'timeshift'
-    elif ctl.get('id') in _ID_FLAGS and '#' not in ctl.get('texture', ''):
+    elif ctl.get('id') in _ID_FLAGS and '#' not in ctl.get('texture', '') and \
+            ctl.get('type', '').lower() not in ('button', 'togglebutton'):
         flag = _ID_FLAGS[ctl['id']]
     return flag is not None and not values.get(flag)
 
@@ -392,14 +405,15 @@ def _draw_button(painter, skin, ctl, values, rect):
     """A skin Button in its unfocused look: its image, plus its label"""
     image = _sub(ctl, 'imgnofocus')
     host_pill = False
+    pill = 'lstbtn_nofocus_sm.png' if skin.pixmap('lstbtn_nofocus_sm.png') else 'lstbtn_nofocus.png'
     if image is None and _sub(ctl, 'imgfocus') is None and ctl.get('visible', 'true').lower() != 'false' \
-            and skin.pixmap('lstbtn_nofocus.png') and _sub(ctl, 'buttonlabel') is not None:
-        image, host_pill = {'texture': 'lstbtn_nofocus.png'}, True
-    elif image is not None and not image.get('texture') and skin.pixmap('lstbtn_nofocus.png'):
-        image, host_pill = dict(image, texture='lstbtn_nofocus.png'), True      # host default pill
+            and skin.pixmap(pill) and _sub(ctl, 'buttonlabel') is not None:
+        image, host_pill = {'texture': pill}, True
+    elif image is not None and not image.get('texture') and skin.pixmap(pill):
+        image, host_pill = dict(image, texture=pill), True      # host default pill
     elif image is None and _sub(ctl, 'imgfocus') is not None and not _sub(ctl, 'imgfocus').get('texture') \
-            and skin.pixmap('lstbtn_nofocus.png'):
-        image, host_pill = {'texture': 'lstbtn_nofocus.png'}, True
+            and skin.pixmap(pill):
+        image, host_pill = {'texture': pill}, True
     if image:
         _draw_image(painter, skin, dict(image), values, QRectF(rect))
     label = _sub(ctl, 'buttonlabel')
@@ -411,6 +425,8 @@ def _draw_button(painter, skin, ctl, values, rect):
         text = ui_string(caption)
     elif caption.lower() in LANG_STRINGS:
         text = LANG_STRINGS[caption.lower()]
+    elif caption.startswith('#'):
+        text = expand(caption, values)          # e.g. #TV.red: the colour key's function in this window
     elif not caption or caption == '-':
         text = LANG_STRINGS.get((ctl.get('description') or '').lower(), '')
     elif host_pill:
@@ -426,13 +442,30 @@ def _draw_button(painter, skin, ctl, values, rect):
         _draw_label(painter, skin, lab, values, lab_rect)
 
 
+def _draw_group_tab(painter, skin, ctl, screen, values, rect):
+    """One of the small TV / Radio / Favourites toggle buttons: LED on for the group shown"""
+    ident = ctl.get('id')
+    if ident not in ('3', '4', '5') or not skin.pixmap('togglebutton-on-nofocus-sm.png'):
+        return
+    active = {'tv': '3', 'radio': '4', 'fav': '5'}.get(getattr(screen, 'group', 'tv'), '3') == ident
+    image = _sub(ctl, 'imgnofocus' if active else 'imgaltnofocus')
+    if image:
+        _draw_image(painter, skin, dict(image), values, QRectF(rect))
+    label = _sub(ctl, 'buttonlabel') or {}
+    text = ui_string(label.get('label', '')) or {'3': 'TV', '4': 'Radio', '5': 'Favoriten' if _language == 'de' else 'Favourites'}[ident]
+    painter.setFont(skin.qfont(label.get('font') or 'font16'))
+    painter.setPen(parse_color(label.get('textcolor'), 'FFFFFFFF'))
+    painter.drawText(rect.adjusted(_num(ctl, 'textoffsetx', 25), 0, -24, 0), int(Qt.AlignLeft | Qt.AlignVCenter), text)
+
+
 def _draw_group_banner(painter, skin, ctl, screen, values, window):
     """Bottom-right group logo (TV / Radio / Favourites); the image carries the title text"""
     wanted = {'tv': '3', 'radio': '4', 'fav': '5'}.get(getattr(screen, 'group', 'tv'), '3')
-    if ctl.get('id') != wanted:
-        return
     rect = _rect(ctl)
-    if rect.width() < 400:   # small toggles are tab buttons (older skins), not a group logo
+    if rect.width() < 400:   # small toggles are the TV / Radio / Favourites tabs
+        _draw_group_tab(painter, skin, ctl, screen, values, rect)
+        return
+    if ctl.get('id') != wanted:
         return
     image = _sub(ctl, 'imgfocus')
     if image:
@@ -505,6 +538,25 @@ def _draw_menu_list(painter, skin, ctl, button, screen, rect):
     painter.restore()
 
 
+def _draw_list_pager(painter, skin, ctl, lst, rows_per_page):
+    """'page/pages' and the up/down arrow button of a list that needs more than one page
+    (the Spincontrol sub-control marks where; skins that hide it get nothing)"""
+    spin = next((c for c in ctl.get('subs', []) if c.get('type', '').lower() == 'spincontrol'), None)
+    down, up = skin.pixmap('arrow_down_nofocus_button.png'), skin.pixmap('arrow_up_nofocus_button.png')
+    if spin is None or down is None or up is None or spin.get('visible', 'true').lower() == 'false' \
+            or spin.get('disabled', 'false').lower() == 'true' or rows_per_page <= 0:
+        return
+    pages = -(-len(lst.items) // rows_per_page)
+    if pages <= 1:
+        return
+    x, y, w, h = _num(spin, 'x'), _num(spin, 'y'), _num(spin, 'width', 26) or 26, _num(spin, 'height', 27) or 27
+    painter.setFont(skin.qfont(ctl.get('font2') or ctl.get('font')))
+    painter.setPen(parse_color(ctl.get('textcolor'), 'FFFFFFFF'))
+    painter.drawText(QRectF(x, y, 40, h), int(Qt.AlignLeft | Qt.AlignVCenter), '%d/%d' % (lst.selected // rows_per_page + 1, pages))
+    painter.drawPixmap(QRectF(x + 40, y, w, h), down, QRectF(down.rect()))
+    painter.drawPixmap(QRectF(x + 40 + w, y, w, h), up, QRectF(up.rect()))
+
+
 def _draw_textbox(painter, skin, ctl, values, rect):
     """Multi-line text (descriptions): wrapped, from the top"""
     text = expand(ctl.get('label', ''), values)
@@ -544,7 +596,23 @@ def _draw_progress(painter, skin, ctl, values, rect):
         painter.restore()
 
 
-def render(painter, skin, key, values, width, height, screen=None):
+def thumb_rect(skin, window):
+    """Video-window rectangle when the window shows the live picture as a small thumbnail, else None
+    (1x1 means 'no video here', a large one means the picture stays full size behind the window)"""
+    vw = getattr(window, 'videowindow', None)
+    if vw and vw[2] >= 20 and vw[3] >= 20 and vw[2] < skin.size_x * 0.6:
+        return vw
+    return None
+
+
+def screen_info(skin, key):
+    """Programme info for a menu/file window: windows with a video thumbnail (<videowindow>) show the
+    running programme in their header, the others have no use for it (the skin would print it somewhere odd)"""
+    window = skin.window(key)
+    return {'tv.now.description': ''} if window is not None and thumb_rect(skin, window) else dict(NO_TV_INFO)
+
+
+def render(painter, skin, key, values, width, height, screen=None, thumb=None):
     """Paint OSD window `key` (volume/clock/miniepg) into a width x height area"""
     window = skin.window(key)
     if window is None:
@@ -553,6 +621,16 @@ def render(painter, skin, key, values, width, height, screen=None):
     painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
                            QPainter.SmoothPixmapTransform)
     painter.scale(width / skin.size_x, height / skin.size_y)
+    vw = thumb_rect(skin, window)
+    if screen is not None and vw:
+        # the live picture shrinks into the video window; everything else is the opaque skin
+        painter.fillRect(QRectF(0, 0, skin.size_x, skin.size_y), QColor(0, 0, 0))
+        if thumb is not None and not thumb.isNull():
+            box = QRectF(*vw)
+            scaled = thumb.size().scaled(int(box.width()), int(box.height()), Qt.KeepAspectRatio)
+            target = QRectF(box.x() + (box.width() - scaled.width()) / 2, box.y() + (box.height() - scaled.height()) / 2,
+                            scaled.width(), scaled.height())
+            painter.drawPixmap(target, thumb, QRectF(thumb.rect()))
     if screen is not None:
         # the window's own <Backdrop>; windows without one use background.png when hasbg="true"
         name = window.backdrop if window.backdrop else ('background.png' if window.has_bg and window.backdrop != '-' else '')
@@ -671,10 +749,12 @@ def _draw_list(painter, skin, ctl, lst, focused):
             hflag = Qt.AlignRight if (n == 1 and ctl.get('align1', '').lower() == 'right') else Qt.AlignLeft
             flags = int(hflag | vflag) | (int(Qt.TextWordWrap) if n == 3 else 0)
             painter.save()
-            painter.setClipRect(text_rect.intersected(row_rect))
+            clip = row_rect if step >= item_h else QRectF(row_rect.x(), row_rect.y(), row_rect.width(), step)
+            painter.setClipRect(text_rect.intersected(clip))
             painter.drawText(text_rect, flags, text)
             painter.restore()
     painter.restore()
+    _draw_list_pager(painter, skin, ctl, lst, rows)
 
 
 class OSDList:
@@ -869,7 +949,7 @@ class OSDMenuScreen:
 
     def _update(self):
         owner = next((e for e in self.all_items if e['id'] and e['id'] == self.parent), None)
-        values = dict(NO_TV_INFO, currentwindow=owner['name'] if owner else 'Home Window')
+        values = dict(screen_info(self.skin, self.window_key), currentwindow=owner['name'] if owner else 'Home Window')
         n = len(self.items)
         for offset in (-2, -1, 0, 1, 2):
             suffix = '' if offset == 0 else '%+d' % offset
@@ -1231,6 +1311,7 @@ class OSDOverlay(QWidget):
         self.skin = None
         self.screen = None  # OSDScreen drawn on the 'screen' layer
         self.picture = None  # QPixmap shown on the 'picture' layer
+        self.thumb = None    # live-picture snapshot for windows with a video window
         self.opacity = 1.0  # user setting: how see-through the whole OSD is
         self.notice_text = ''
         self.values = {}
@@ -1326,7 +1407,7 @@ class OSDOverlay(QWidget):
             elif key == 'screen':
                 if self.screen is not None:
                     render(painter, self.skin, getattr(self.screen, 'window_key', self.screen.key), {**self.values, **self.screen.values},
-                           self.width(), self.height(), self.screen)
+                           self.width(), self.height(), self.screen, self.thumb)
             else:
                 render(painter, self.skin, key, self.values, self.width(), self.height())
         painter.end()
