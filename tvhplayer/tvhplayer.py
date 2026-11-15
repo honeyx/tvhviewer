@@ -2835,7 +2835,7 @@ class TVHeadendClient(QMainWindow):
             QTimer.singleShot(0, lambda: self.open_osd_window('channels'))
         elif entry_id == '600':               # Timeline
             QTimer.singleShot(0, lambda: self.open_osd_window('timeline'))
-        elif entry_id == '2':                 # Channel EPG
+        elif entry_id in ('2', '3'):          # Channel EPG / EPG Now (same window)
             QTimer.singleShot(0, lambda: self.open_osd_window('epgchannel'))
         elif entry_id == '20':                # Pictures
             QTimer.singleShot(0, lambda: self.open_osd_window('pictures'))
