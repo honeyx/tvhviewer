@@ -411,11 +411,36 @@ def _draw_menu_label(painter, skin, ctl, values, rect):
     painter.drawText(rect, int(Qt.AlignHCenter | Qt.AlignVCenter), text)
 
 
+def _menu_step(skin, ctl, button):
+    """Row pitch of a list menu: the button height, else focus image height plus the Menu's Space"""
+    height = _num(button, 'height', 0)
+    if height:
+        return height
+    focus = _sub(ctl, 'imgfocus')
+    pix = skin.pixmap(focus.get('texture')) if focus else None
+    return (pix.height() if pix and not pix.isNull() else 40) + _num(ctl, 'space', 0)
+
+
+def menu_is_list(skin, ctl):
+    """True when a Menu control is a vertical list rather than a ring/single label"""
+    button = _sub(ctl, 'button')
+    return bool(button) and _rect(ctl).height() >= _menu_step(skin, ctl, button) * 1.5
+
+
 def _draw_menu_list(painter, skin, ctl, button, screen, rect):
     """A Menu control that is a vertical list of buttons (e.g. the Default skin's main
     menu): the focused entry sits in the middle row and the list wraps around"""
-    step = _num(button, 'height', 40) or 40
+    step = _menu_step(skin, ctl, button)
+    backdrop = _sub(ctl, 'image')
+    if backdrop is not None and not backdrop.get('texture'):
+        painter.fillRect(_rect(backdrop), QColor(26, 42, 100, 238))   # host-drawn panel behind the list
     focus_img = _sub(ctl, 'imgfocus')
+    nofocus_img = _sub(ctl, 'imgnofocus')
+    # a missing texture means the host default pill; '-' means none
+    if focus_img is not None and not focus_img.get('texture'):
+        focus_img = dict(focus_img, texture='lstbtn_focus.png')
+    if nofocus_img is None and focus_img is not None and skin.pixmap('lstbtn_nofocus.png'):
+        nofocus_img = {'texture': 'lstbtn_nofocus.png'}
     label = _sub(ctl, 'buttonlabel') or {}
     rows = max(1, int(rect.height() // step))
     items, n = screen.items, len(screen.items)
@@ -431,6 +456,8 @@ def _draw_menu_list(painter, skin, ctl, button, screen, rect):
         selected = index == screen.index
         if selected and focus_img:
             _draw_image(painter, skin, dict(focus_img), {}, QRectF(row_rect))
+        elif not selected and nofocus_img and nofocus_img.get('texture'):
+            _draw_image(painter, skin, dict(nofocus_img), {}, QRectF(row_rect.adjusted(0, 2, 0, -2)))
         color = (ctl.get('selectedcolor') or label.get('textselectedcolor')) if selected else \
             (label.get('disabledcolor') or label.get('textcolor'))
         painter.setPen(parse_color(color, 'FFFFFFFF'))
@@ -519,7 +546,7 @@ def render(painter, skin, key, values, width, height, screen=None):
             _draw_group_banner(painter, skin, ctl, screen, values, window)
         elif ctype == 'menu' and screen is not None and getattr(screen, 'key', '') == 'home':
             button = _sub(ctl, 'button') or {}
-            if button and rect.height() >= _num(button, 'height', rect.height()) * 1.5:
+            if menu_is_list(skin, ctl):
                 _draw_menu_list(painter, skin, ctl, button, screen, rect)   # vertical list menu
             else:
                 _draw_menu_label(painter, skin, ctl, screen.values, rect)   # ring: name of the focused entry
@@ -813,8 +840,7 @@ class OSDMenuScreen:
         window = self.skin.window(self.window_key)
         for ctl in (window.controls if window else []):
             if ctl.get('type', '').lower() == 'menu':
-                button = _sub(ctl, 'button')
-                return bool(button) and _rect(ctl).height() >= _num(button, 'height', 1e9) * 1.5
+                return menu_is_list(self.skin, ctl)
         return False
 
     def handle(self, action):
