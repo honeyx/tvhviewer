@@ -42,6 +42,7 @@ import requests
 import time
 import subprocess
 import threading
+from urllib.parse import quote
 import shlex
 import shutil
 import os
@@ -1199,6 +1200,9 @@ AUDIO_EXTENSIONS = ('.mp3', '.flac', '.m4a', '.ogg', '.wav', '.aac', '.wma', '.o
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS + AUDIO_EXTENSIONS
 # OSD file windows: key -> (config key of the folder, title, file types)
+# OSD lists filled from the Tvheadend server: key -> (skin window, API endpoint)
+SERVER_LISTS = {'serverrecs': ('recordings', 'grid_finished'), 'timer': ('timer', 'grid_upcoming')}
+
 FILE_WINDOWS = {
     'videos': ('video_path', 'Video Folder', VIDEO_EXTENSIONS),
     'recordings': ('recordings_path', 'Recordings Folder', VIDEO_EXTENSIONS),
@@ -1445,6 +1449,8 @@ class KeyMapDialog(QDialog):
 
 
 class TVHeadendClient(QMainWindow):
+    serverListReady = pyqtSignal(str, list, str)     # window key, rows, error text
+
     def __init__(self):
         super().__init__()
         self.setup_paths()
@@ -1744,7 +1750,10 @@ class TVHeadendClient(QMainWindow):
         self.favorites_menu = favorites_menu
         self.settings_menu = settings_menu
 
-        play_rec_action = QAction("Play Recording...", self)
+        play_srv_action = QAction("Play Server Recording...", self)
+        play_srv_action.triggered.connect(lambda: self.open_osd_window('serverrecs'))
+        file_menu.addAction(play_srv_action)
+        play_rec_action = QAction("Play Local Recording...", self)
         play_rec_action.triggered.connect(lambda: self.open_media_browser('recordings'))
         file_menu.addAction(play_rec_action)
         play_vid_action = QAction("Play Video...", self)
@@ -1855,7 +1864,7 @@ class TVHeadendClient(QMainWindow):
         video_folder_action = QAction("Video Folder...", self)
         video_folder_action.triggered.connect(lambda: self.set_media_folder('videos'))
         settings_menu.addAction(video_folder_action)
-        rec_folder_action = QAction("Recordings Folder...", self)
+        rec_folder_action = QAction("Local Recordings Folder...", self)
         rec_folder_action.triggered.connect(lambda: self.set_media_folder('recordings'))
         settings_menu.addAction(rec_folder_action)
 
@@ -2641,7 +2650,8 @@ class TVHeadendClient(QMainWindow):
             self.show_channel_dialog()
 
     def open_osd_window(self, key, favourites=False):
-        if osdskin is None or self.osd_skin is None or self.osd_skin.window(key) is None:
+        skin_key = SERVER_LISTS[key][0] if key in SERVER_LISTS else key
+        if osdskin is None or self.osd_skin is None or self.osd_skin.window(skin_key) is None:
             self.statusbar.showMessage("Select an OSD skin first (Settings -> OSD Skin)")
             return
         mode = (key, bool(favourites))
@@ -2674,6 +2684,11 @@ class TVHeadendClient(QMainWindow):
             screen.channel_index = next((i for i, c in enumerate(self.channels) if c.get('uuid') == current), 0)
             self.osd_screen = screen
             self._osd_fill_epg()
+        elif key in SERVER_LISTS:
+            screen = osdskin.OSDScreen(self.osd_skin, skin_key, on_ok=self._osd_server_ok)
+            screen.values = dict(osdskin.NO_TV_INFO, itemcount='')
+            self.osd_screen = screen
+            self._osd_load_server_list(key)
         elif key in FILE_WINDOWS:
             screen = osdskin.OSDScreen(self.osd_skin, key, on_ok=self._osd_file_ok)
             screen.root = screen.folder = root
@@ -2841,8 +2856,10 @@ class TVHeadendClient(QMainWindow):
             QTimer.singleShot(0, lambda: self.open_osd_window('pictures'))
         elif entry_id == '5':                 # Music
             QTimer.singleShot(0, lambda: self.open_osd_window('music'))
-        elif entry_id == '603':               # Recordings
-            QTimer.singleShot(0, lambda: self.open_osd_window('recordings'))
+        elif entry_id == '603':               # Recordings (from the Tvheadend server)
+            QTimer.singleShot(0, lambda: self.open_osd_window('serverrecs'))
+        elif entry_id == '4':                 # Timer = upcoming Tvheadend recordings
+            QTimer.singleShot(0, lambda: self.open_osd_window('timer'))
         elif entry_id == '6':                 # Movies / Videos
             QTimer.singleShot(0, lambda: self.open_osd_window('videos'))
         elif entry_id == '102':               # Clock
@@ -2908,6 +2925,81 @@ class TVHeadendClient(QMainWindow):
         screen = self.osd_screen
         screen.channel_index = (screen.channel_index + delta) % len(self.channels)
         self._osd_fill_epg()
+
+    # -- Tvheadend recordings / upcoming timers as OSD lists -------------------
+    def _server_base(self, with_auth=False):
+        server = self.servers[self.server_combo.currentIndex()]
+        url = server['url']
+        if not url.startswith(('http://', 'https://')):
+            url = 'http://' + url
+        auth = None
+        if server.get('username') or server.get('password'):
+            auth = (server.get('username', ''), server.get('password', ''))
+            if with_auth:
+                url = url.replace('://', '://%s:%s@' % (quote(auth[0], safe=''), quote(auth[1], safe='')), 1)
+        return url, auth
+
+    def _osd_load_server_list(self, key):
+        """Fetch the list in a worker thread so the UI never waits for the server"""
+        if not getattr(self, '_server_list_connected', False):
+            self.serverListReady.connect(self._osd_fill_server_list)
+            self._server_list_connected = True
+        try:
+            base, auth = self._server_base()
+        except Exception:
+            self.serverListReady.emit(key, [], "no server")
+            return
+        endpoint = SERVER_LISTS[key][1]
+
+        def work():
+            try:
+                resp = requests.get(f'{base}/api/dvr/entry/{endpoint}', params={'limit': 1000},
+                                    auth=auth, timeout=8)
+                resp.raise_for_status()
+                self.serverListReady.emit(key, resp.json().get('entries', []), '')
+            except Exception as e:
+                self.serverListReady.emit(key, [], str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _osd_fill_server_list(self, key, entries, error):
+        screen = self.osd_screen
+        if screen is None or self._osd_mode != (key, False):
+            return                                    # window was closed meanwhile
+        if error:
+            self.close_osd_window()
+            self._osd_notice("Tvheadend: " + error[:80])
+            return
+        upcoming = key == 'timer'
+        entries = sorted(entries, key=lambda e: e.get('start', 0), reverse=not upcoming)
+        german = QLocale.system().language() == QLocale.German
+        days = ('Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So') if german else ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+        rows = []
+        for e in entries:
+            start = datetime.fromtimestamp(e.get('start', 0))
+            title = e.get('disp_title') or ''
+            text = "%s %s  %s - %s" % (days[start.weekday()], start.strftime('%d.%m. %H:%M'),
+                                       e.get('channelname', ''), title)
+            if upcoming and e.get('sched_status') == 'recording':
+                text = "\u25cf " + text
+            rows.append({'label1': text, 'label2': '', 'label3': '', 'icon': '',
+                         'data': {'uuid': e.get('uuid', ''), 'title': title, 'finished': not upcoming}})
+        list_id = next(iter(screen.lists), None)
+        if list_id is not None:
+            screen.lists[list_id].set_items(rows, 0)
+        screen.values = dict(osdskin.NO_TV_INFO, itemcount=str(len(rows)))
+        if not rows:
+            self._osd_notice("Keine Einträge" if german else "No entries")
+        if self.osd_overlay is not None:
+            self.osd_overlay.screen = screen
+            self.osd_overlay.update()
+
+    def _osd_server_ok(self, list_id, item):
+        """Enter on a server recording plays it from Tvheadend; upcoming timers are view-only"""
+        if not item or not item['data'].get('finished'):
+            return
+        url, _ = self._server_base(with_auth=True)
+        self.close_osd_window()
+        self.play_media_file('%s/dvrfile/%s' % (url, item['data']['uuid']))
 
     def media_folder(self, key):
         """Folder of a file window ('' if unset or not reachable right now)"""
