@@ -521,7 +521,10 @@ def _draw_textbox(painter, skin, ctl, values, rect):
 def _draw_progress(painter, skin, ctl, values, rect):
     """progress / tickprogress: draw the background part, then the 'mid' part
     clipped to the current value (horizontal, or vertical when direction=1)."""
-    percent = _percent(expand(ctl.get('label', ''), values))
+    label = expand(ctl.get('label', ''), values)
+    if ctl.get('label', '').strip().startswith('#') and not label.strip():
+        return                       # no value behind the placeholder (e.g. no programme): no bar at all
+    percent = _percent(label)
     for sub in ctl['subs']:
         name = sub.get('description', '').lower()
         if name in ('left', 'right', 'label'):
@@ -823,7 +826,7 @@ def load_menu_entries(windowdef_path=None):
 
 
 # DVBViewer shows no now/next or channel text in menu windows, so those labels stay empty
-NO_TV_INFO = {'channelname': '', 'channelnr': '', 'tv.now.start': '', 'tv.now.title': '',
+NO_TV_INFO = {'channelname': '', 'channelnr': '', 'tv.now.start': '', 'tv.now.title': '', 'tv.now.percentage': '',
               'tv.now.remain': '', 'tv.now.description': '', 'tv.next.start': '', 'tv.next.title': ''}
 
 
