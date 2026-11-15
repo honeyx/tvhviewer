@@ -42,7 +42,7 @@ import requests
 import time
 import subprocess
 import threading
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import shlex
 import shutil
 import os
@@ -1209,6 +1209,30 @@ FILE_WINDOWS = {
     'pictures': ('pictures_path', 'Pictures Folder', IMAGE_EXTENSIONS),
     'music': ('music_path', 'Music Folder', AUDIO_EXTENSIONS),
 }
+
+
+def resolve_media_path(path):
+    """smb://server/share/dir as typed in a file manager -> a path this program can open:
+    Linux file managers (Nemo, Nautilus...) mount it below /run/user/<uid>/gvfs, Windows uses \\\\server\\share"""
+    path = (path or '').strip()
+    if not path.lower().startswith('smb://'):
+        return path
+    parts = [unquote(p) for p in path[6:].split('/') if p]
+    if len(parts) < 2:
+        return path
+    server, share, rest = parts[0], parts[1], parts[2:]
+    if sys.platform == 'win32':
+        return '\\\\' + '\\'.join([server, share] + rest)
+    for base in ('/run/user/%d/gvfs' % os.getuid(), os.path.expanduser('~/.gvfs')):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            low = name.lower()
+            if low.startswith('smb-share:') and ('server=' + server.lower()) in low and ('share=' + share.lower()) in low.split(','):
+                return os.path.join(base, name, *rest)
+    return path
 
 
 def list_media_folder(folder, root, newest_first=False, extensions=MEDIA_EXTENSIONS):
@@ -3006,6 +3030,7 @@ class TVHeadendClient(QMainWindow):
         path = self.config.get(FILE_WINDOWS[key][0], '')
         if key == 'recordings' and not path:
             path = self.config.get('recording_path', '')
+        path = resolve_media_path(path)
         return path if path and os.path.isdir(path) else ''
 
     def set_media_folder(self, key):
@@ -3022,7 +3047,8 @@ class TVHeadendClient(QMainWindow):
         browse = QPushButton("Browse...")
 
         def _browse():
-            start = edit.text().strip() if os.path.isdir(edit.text().strip()) else str(Path.home())
+            typed = resolve_media_path(edit.text())
+            start = typed if os.path.isdir(typed) else str(Path.home())
             chosen = QFileDialog.getExistingDirectory(dialog, title, start, QFileDialog.DontUseNativeDialog)
             if chosen:
                 edit.setText(chosen)
@@ -3037,8 +3063,9 @@ class TVHeadendClient(QMainWindow):
         if dialog.exec_() != QDialog.Accepted:
             return
         path = edit.text().strip()
-        if path and not os.path.isdir(path):
-            answer = QMessageBox.question(self, title, f"'{path}' can't be reached right now. Save it anyway?")
+        if path and not os.path.isdir(resolve_media_path(path)):
+            answer = QMessageBox.question(self, title, f"'{path}' can't be reached right now. Save it anyway?\n"
+                                          "(smb:// addresses work once the share is open in the file manager.)")
             if answer != QMessageBox.Yes:
                 return
         self.config[cfg_key] = path
