@@ -42,6 +42,7 @@ import requests
 import time
 import subprocess
 import threading
+import tempfile
 from urllib.parse import quote, unquote
 import shlex
 import shutil
@@ -2710,7 +2711,7 @@ class TVHeadendClient(QMainWindow):
             self._osd_fill_epg()
         elif key in SERVER_LISTS:
             screen = osdskin.OSDScreen(self.osd_skin, skin_key, on_ok=self._osd_server_ok)
-            screen.values = dict(osdskin.NO_TV_INFO, itemcount='')
+            screen.values = dict(osdskin.screen_info(self.osd_skin, skin_key), itemcount='')
             self.osd_screen = screen
             self._osd_load_server_list(key)
         elif key in FILE_WINDOWS:
@@ -2744,6 +2745,11 @@ class TVHeadendClient(QMainWindow):
             for entry in entries:
                 entry['display'] = names.get(entry['text'], entry['text'])
             self.osd_screen = osdskin.OSDMenuScreen(self.osd_skin, entries, on_ok=self._osd_menu_ok)
+            last = self.config.get('osd_last_menu', '')       # reopen at the entry used last
+            ids = [e['id'] for e in self.osd_screen.items]
+            if last in ids:
+                self.osd_screen.index = ids.index(last)
+                self.osd_screen._update()
             self._log_missing_icons()
         if self.osd_overlay is None:
             self.osd_overlay = osdskin.OSDOverlay(self)
@@ -2753,6 +2759,31 @@ class TVHeadendClient(QMainWindow):
         self.osd_overlay.show_layer(self.osd_skin, 'screen', self.osd_values(), area, None)
         self.apply_osd_input_state()
         self._touch_osd()
+        if not hasattr(self, '_osd_thumb_timer'):
+            self._osd_thumb_timer = QTimer(self)
+            self._osd_thumb_timer.timeout.connect(self._osd_update_thumb)
+        self._osd_thumb_timer.start(1000)
+        self._osd_update_thumb()
+
+    def _osd_update_thumb(self):
+        """Windows with a video window show the live picture as a thumbnail: a snapshot once a second"""
+        screen = self.osd_screen
+        if screen is None or self.osd_overlay is None or self.osd_skin is None:
+            self._osd_thumb_timer.stop()
+            return
+        window = self.osd_skin.window(getattr(screen, 'window_key', screen.key))
+        if not (window and osdskin.thumb_rect(self.osd_skin, window)):
+            self.osd_overlay.thumb = None
+            return
+        path = os.path.join(tempfile.gettempdir(), 'tvhviewer_thumb.png')
+        try:
+            self.media_player.video_take_snapshot(0, path, 320, 0)
+            pix = QPixmap(path)
+            if not pix.isNull():
+                self.osd_overlay.thumb = pix
+                self.osd_overlay.update()
+        except Exception:
+            pass
 
     def _touch_osd(self):
         """Any input restarts the idle countdown of an open OSD window"""
@@ -2761,6 +2792,10 @@ class TVHeadendClient(QMainWindow):
 
     def close_osd_window(self):
         self._osd_idle.stop()
+        if hasattr(self, '_osd_thumb_timer'):
+            self._osd_thumb_timer.stop()
+        if self.osd_overlay is not None:
+            self.osd_overlay.thumb = None
         self._picture_index = None
         if self.osd_overlay is not None:
             self.osd_overlay.picture = None
@@ -2835,7 +2870,8 @@ class TVHeadendClient(QMainWindow):
             items.append({'label1': _epg_text(ev.get('title'), 'No title'), 'label2': start,
                           'label3': desc, 'icon': '', 'data': ev})
         screen.lists['100'].set_items(items, 0)
-        screen.values = {'channelname': channel.get('name', ''), 'channelnr': str(channel.get('number') or '')}
+        screen.values = dict(osdskin.screen_info(self.osd_skin, 'channels'),
+                             channelname=channel.get('name', ''), channelnr=str(channel.get('number') or ''))
 
     def _osd_after_channel_change(self):
         """+/-, PgUp/PgDn work while the list is open: follow the new channel"""
@@ -2865,6 +2901,10 @@ class TVHeadendClient(QMainWindow):
 
     def _osd_menu_ok(self, entry):
         """OK on a home-menu entry: run what we support, say so for the rest"""
+        top = entry.get('id', '') if entry.get('parent') in ('0', '', None) else entry.get('parent')
+        if top and self.config.get('osd_last_menu') != top:
+            self.config['osd_last_menu'] = top
+            self.save_config()
         entry_id, application = entry.get('id'), entry.get('application')
         self.close_osd_window()
         if application:                       # external program entry (Kodi)
@@ -2929,8 +2969,12 @@ class TVHeadendClient(QMainWindow):
         genre = ''
         if lst and n:
             genre = _epg_text(lst.items[lst.selected]['data'].get('genre', ''))
-        screen.values = dict(osdskin.NO_TV_INFO, **{
+        screen.values = dict(osdskin.screen_info(self.osd_skin, 'epgchannel'), **{
             'epg.channelname': screen.epg_channel.get('name', ''), 'epg.genre': genre, 'epg.logo': '',
+            'tv.red': 'Aufnehmen' if QLocale.system().language() == QLocale.German else 'Record',
+            'tv.green': 'Jetzt' if QLocale.system().language() == QLocale.German else 'Now',
+            'tv.yellow': 'Umschalten' if QLocale.system().language() == QLocale.German else 'Tune',
+            'tv.blue': 'Menü' if QLocale.system().language() == QLocale.German else 'Menu',
             'itemcount': f"{lst.selected + 1}/{n}" if n else '0'})
 
     def _osd_timeline_ok(self, channel):
@@ -3010,7 +3054,7 @@ class TVHeadendClient(QMainWindow):
         list_id = next(iter(screen.lists), None)
         if list_id is not None:
             screen.lists[list_id].set_items(rows, 0)
-        screen.values = dict(osdskin.NO_TV_INFO, itemcount=str(len(rows)))
+        screen.values = dict(osdskin.screen_info(self.osd_skin, screen.key), itemcount=str(len(rows)))
         if not rows:
             self._osd_notice("Keine Einträge" if german else "No entries")
         if self.osd_overlay is not None:
@@ -3097,7 +3141,7 @@ class TVHeadendClient(QMainWindow):
         if list_id is None:
             return
         screen.lists[list_id].set_items(rows, 1 if rows and rows[0]['data'].get('up') and len(rows) > 1 else 0)
-        screen.values = dict(osdskin.NO_TV_INFO,
+        screen.values = dict(osdskin.screen_info(self.osd_skin, screen.key),
                              itemcount=str(len([r for r in rows if not r['data'].get('up')])))
 
     def _osd_file_ok(self, list_id, item):
@@ -3156,7 +3200,10 @@ class TVHeadendClient(QMainWindow):
             self.statusbar.showMessage("Kodi is running - playback is paused until it is closed")
             return
         try:
-            self.media_player.set_media(self.instance.media_new(path))
+            # python-vlc takes any name with a ':' for a URL; mounted shares (gvfs: 'smb-share:server=...')
+            # are plain files, so open existing paths as such
+            media = self.instance.media_new_path(path) if os.path.exists(path) else self.instance.media_new(path)
+            self.media_player.set_media(media)
             self.media_player.play()
             self.statusbar.showMessage(f"Playing: {os.path.basename(path)}")
         except Exception as e:
