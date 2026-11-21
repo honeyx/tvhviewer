@@ -27,7 +27,7 @@ WINDOW_FILES = {   # every entry: candidate file names, first existing one wins 
     'home': ('home.xml', 'myhome.xml'),          # sub menus (Media Center, System, ...)
     'homemain': ('myhome.xml', 'home.xml'),      # the main menu
     'recordings': ('myrecordings.xml',),
-    'videos': ('mymovies.xml', 'myvideo.xml'),
+    'videos': ('myvideo.xml', 'mymovies.xml'),
     'pictures': ('mypics.xml',),
     'music': ('mymusicfiles.xml',),
     'epgchannel': ('myepgchannel.xml',),
@@ -305,9 +305,11 @@ def _hidden(ctl, values):
 UI_STRINGS = {
     'de': {'901': 'TV / Radio / Fav', '902': 'EPG anzeigen', '903': 'Favoriten-Editor', '904': 'Kontext', '3': 'Videos',
            '136': 'Wiedergabeliste', '341': 'DVD', '654': 'Auswerfen',
+           '906': 'Hinzufügen', '905': 'Ebene höher', '103': 'Sortieren', '100': 'Ansicht',
            },
     'en': {'901': 'TV / Radio / Fav', '902': 'Show EPG', '903': 'Favourites editor', '904': 'Context', '3': 'Videos',
            '136': 'Playlist', '341': 'DVD', '654': 'Eject',
+           '906': 'Add', '905': 'Level up', '103': 'Sort', '100': 'View as',
            },
 }
 # host-supplied captions of file-window buttons (#Lang.xxx placeholders and the view/sort buttons)
@@ -1034,6 +1036,7 @@ class OSDTimeline:
         self.cursor = self.now
         self.start = self._floor(self.now)
         self.event = None
+        self.focus_mode = 'channel'      # 'channel' (name column) or 'event' (a programme cell)
         self._select()
 
     # -- template geometry -----------------------------------------------
@@ -1094,6 +1097,17 @@ class OSDTimeline:
                        'mr.currentwindowtitle': 'Timeline', 'channelname': '', 'tv.now.start': '',
                        'tv.now.title': '', 'tv.guide.chlogo': ''}
 
+    def shift(self, seconds):
+        """Move the time cursor (and the visible window) by `seconds`"""
+        self.cursor = max(self.now, self.cursor + seconds)
+        self.start = self._floor(self.cursor)
+        self._select()
+
+    def to_now(self):
+        self.cursor = self.now
+        self.start = self._floor(self.now)
+        self._select()
+
     # -- remote control -----------------------------------------------------------
     def handle(self, action):
         if not self.channels:
@@ -1105,6 +1119,13 @@ class OSDTimeline:
             return True
         if action in ('left', 'right'):
             events = self.events(self.channel())
+            if self.focus_mode == 'channel':
+                if action == 'right':
+                    self.focus_mode = 'event'
+                return True
+            if action == 'left' and (self.event not in events or events.index(self.event) == 0):
+                self.focus_mode = 'channel'
+                return True
             if self.event in events:
                 i = events.index(self.event) + (-1 if action == 'left' else 1)
                 if 0 <= i < len(events):
@@ -1203,7 +1224,7 @@ def _draw_timeline_grid(painter, skin, screen, panel):
             x0 = left + (max(ev['start'], t0) - t0) / 60.0 * ppm
             x1 = left + (min(ev['stop'], t1) - t0) / 60.0 * ppm
             cell = QRectF(x0 + 1, top + 1, max(2.0, x1 - x0 - 2), row_h - 3)
-            selected = ev is screen.event and r == middle
+            selected = ev is screen.event and r == middle and screen.focus_mode == 'event'
             running = ev['start'] <= screen.now < ev['stop']
             state = 'selected' if selected else ('light' if running else '')
             imgs = _timeline_cell_images(skin, state)
@@ -1312,6 +1333,7 @@ class OSDOverlay(QWidget):
         self.screen = None  # OSDScreen drawn on the 'screen' layer
         self.picture = None  # QPixmap shown on the 'picture' layer
         self.thumb = None    # live-picture snapshot for windows with a video window
+        self.dynamic = None  # callable -> extra placeholder values (colour button captions)
         self.opacity = 1.0  # user setting: how see-through the whole OSD is
         self.notice_text = ''
         self.values = {}
@@ -1406,7 +1428,7 @@ class OSDOverlay(QWidget):
                     painter.restore()
             elif key == 'screen':
                 if self.screen is not None:
-                    render(painter, self.skin, getattr(self.screen, 'window_key', self.screen.key), {**self.values, **self.screen.values},
+                    render(painter, self.skin, getattr(self.screen, 'window_key', self.screen.key), {**self.values, **self.screen.values, **(self.dynamic() if self.dynamic else {})},
                            self.width(), self.height(), self.screen, self.thumb)
             else:
                 render(painter, self.skin, key, self.values, self.width(), self.height())
