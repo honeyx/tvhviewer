@@ -1154,11 +1154,14 @@ def remote_key_to_qt(text):
 
 def parse_remote_file(path):
     """Read a DVBViewer-style .remote XML profile.
-    Returns {command name: [Qt key strings]} for the keyboard events in it."""
+    Returns {command name: [Qt key strings]}; a command that is in the file without a
+    keyboard event maps to [] (= deliberately unassigned)."""
     import xml.etree.ElementTree as ET
     result = {}
     for command in ET.parse(path).getroot().iter('Command'):
         name = command.get('Name')
+        if not name:
+            continue
         keys = []
         for event in command.iter('Event'):
             if (event.get('Source') or '').lower() != 'keyboard':
@@ -1166,9 +1169,81 @@ def parse_remote_file(path):
             key = remote_key_to_qt(event.text)
             if key and key not in keys:
                 keys.append(key)
-        if name and keys:
-            result[name] = keys
+        # DVBViewer's "Enter" is both Enter keys
+        if 'Return' in keys and 'Enter' not in keys:
+            keys.append('Enter')
+        elif 'Enter' in keys and 'Return' not in keys:
+            keys.insert(keys.index('Enter'), 'Return')
+        result[name] = keys
     return result
+
+
+_QT_TO_REMOTE = {'Backspace': 'Back', 'Space': 'Spacebar', 'Return': 'Enter', 'Esc': 'Esc',
+                 'Volume Mute': 'ch173', 'Volume Down': 'ch174', 'Volume Up': 'ch175'}
+
+
+def qt_to_remote_key(portable):
+    """'Ctrl+Shift+5' -> 'CTRL SHIFT 5' (the notation of .remote files); None if not expressible"""
+    portable = portable or ''
+    if portable.endswith('+'):                       # the '+' key itself, maybe with modifiers
+        parts = [p for p in portable[:-1].split('+') if p] + ['+']
+    else:
+        parts = [p for p in portable.split('+') if p]
+    if not parts:
+        return None
+    *mods, key = parts
+    key = _QT_TO_REMOTE.get(key, key)
+    return ' '.join([m.upper() for m in mods] + [key])
+
+
+def keymap_from_profile(profile, defaults):
+    """Key map {command: 'K1, K2'}: what the profile says for the commands it lists,
+    the built-in default for the rest (max. two keys per command)."""
+    result = {}
+    for command, default in defaults.items():
+        if command in profile:
+            result[command] = ', '.join(profile[command][:2])
+        else:
+            result[command] = default
+    return result
+
+
+def write_remote_file(path, keymap, template=None):
+    """Write the key map into a .remote profile. An existing profile (or `template`) is
+    updated in place so commands we don't handle (and non-keyboard events) survive."""
+    import xml.etree.ElementTree as ET
+    source = template if template and os.path.exists(template) else (path if os.path.exists(path) else None)
+    if source:
+        tree = ET.parse(source)
+        root = tree.getroot()
+    else:
+        root = ET.Element('Remote', Version='1.0')
+        tree = ET.ElementTree(root)
+    root.set('Name', os.path.splitext(os.path.basename(path))[0])
+    commands = {c.get('Name'): c for c in root.iter('Command')}
+    group = None
+    for command, keys in keymap.items():
+        element = commands.get(command)
+        if element is None:
+            if group is None:
+                group = next((g for g in root.iter('Group') if g.get('Name') == 'TVHviewer'), None)
+                if group is None:
+                    group = ET.SubElement(root, 'Group', Name='TVHviewer', ID='99')
+            element = ET.SubElement(group, 'Command', Name=command, Value='0', ID='0')
+        for event in list(element):
+            if event.tag == 'Event' and (event.get('Source') or '').lower() == 'keyboard':
+                element.remove(event)
+        written = []
+        for key in [k.strip() for k in str(keys).split(',') if k.strip()]:
+            text = qt_to_remote_key(key)
+            if key == 'Enter' and 'Return' in [k.strip() for k in str(keys).split(',')]:
+                continue                      # 'Enter' in a .remote file covers both
+            if text and text not in written:
+                written.append(text)
+                ET.SubElement(element, 'Event', Source='Keyboard').text = text
+    if hasattr(ET, 'indent'):
+        ET.indent(tree, space='  ')
+    tree.write(path, encoding='utf-8', xml_declaration=True)
 
 
 MENU_TEXT_DE = {'Program': 'Sender-EPG', 'Channels': 'Senderliste', 'CAM Menu': 'CAM Menü',
@@ -1369,17 +1444,23 @@ class ChannelPickerDialog(QDialog):
 
 
 class KeyMapDialog(QDialog):
-    """Assign keys by pressing them (what a remote / Flirc sends is just keys)"""
+    """Learn keys by pressing them (what a remote / Flirc sends is just keys) and keep them
+    in a .remote profile: open another profile, save under a new name."""
 
-    def __init__(self, keymap, defaults, parent=None):
+    def __init__(self, keymap, defaults, parent=None, remote_path=''):
         super().__init__(parent)
         self.setWindowTitle("Keyboard / Remote Keys")
-        self.resize(560, 560)
+        self.resize(600, 620)
         self._defaults = defaults
         self._commands = list(defaults.keys())
+        self.remote_path = remote_path
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Click a field and press the key (or the remote button) to assign it.\n"
+        layout.addWidget(QLabel("Click a field and press the key or key combination (or the remote button).\n"
+                                "A key already used by another command is taken over from it.\n"
                                 "Backspace/Delete clears a field."))
+        self.file_label = QLabel()
+        layout.addWidget(self.file_label)
+        self._show_file()
         self.table = QTableWidget(len(self._commands), 3)
         self.table.setHorizontalHeaderLabels(['Command', 'Key', 'Alternative key'])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1393,7 +1474,7 @@ class KeyMapDialog(QDialog):
             pair = []
             for col in (1, 2):
                 edit = QKeySequenceEdit()
-                edit.keySequenceChanged.connect(lambda seq, e=edit: self._keep_one_chord(e, seq))
+                edit.keySequenceChanged.connect(lambda seq, e=edit: self._learned(e, seq))
                 self.table.setCellWidget(row, col, edit)
                 pair.append(edit)
             self.edits.append(pair)
@@ -1401,11 +1482,14 @@ class KeyMapDialog(QDialog):
         self._fill(keymap)
 
         buttons = QHBoxLayout()
-        import_btn = QPushButton("Import .remote file...")
-        import_btn.clicked.connect(self.import_remote)
+        open_btn = QPushButton("Open .remote file...")
+        open_btn.clicked.connect(self.open_remote)
+        save_as_btn = QPushButton("Save as...")
+        save_as_btn.clicked.connect(self.save_remote_as)
         reset_btn = QPushButton("Defaults")
         reset_btn.clicked.connect(lambda: self._fill(self._defaults))
-        buttons.addWidget(import_btn)
+        buttons.addWidget(open_btn)
+        buttons.addWidget(save_as_btn)
         buttons.addWidget(reset_btn)
         buttons.addStretch()
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -1414,56 +1498,70 @@ class KeyMapDialog(QDialog):
         buttons.addWidget(box)
         layout.addLayout(buttons)
 
-    @staticmethod
-    def _keep_one_chord(edit, sequence):
-        """QKeySequenceEdit happily records chords like 'Ctrl+K, C'; we only
-        store single keys, so keep the first chord."""
+    def _show_file(self):
+        self.file_label.setText("Profile: <b>%s</b>" % (os.path.basename(self.remote_path) or '-'))
+
+    def _learned(self, edit, sequence):
+        """QKeySequenceEdit happily records chords like 'Ctrl+K, C'; we only store single
+        keys / combinations, so keep the first chord. The new key then leaves any other field."""
         if sequence.count() > 1:
             edit.blockSignals(True)
             edit.setKeySequence(QKeySequence(sequence[0]))
             edit.blockSignals(False)
+            sequence = edit.keySequence()
+        if sequence.isEmpty():
+            return
+        wanted = sequence.toString(QKeySequence.PortableText)
+        for pair in self.edits:
+            for other in pair:
+                if other is not edit and other.keySequence().toString(QKeySequence.PortableText) == wanted:
+                    other.blockSignals(True)
+                    other.clear()
+                    other.blockSignals(False)
 
     def _fill(self, keymap):
         for command, pair in zip(self._commands, self.edits):
             keys = [k.strip() for k in str(keymap.get(command, '')).split(',') if k.strip()]
             for edit, key in zip(pair, keys + ['', '']):
+                edit.blockSignals(True)
                 edit.setKeySequence(QKeySequence(key))
+                edit.blockSignals(False)
 
-    def import_remote(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import remote profile", str(Path.home()),
+    def open_remote(self):
+        start = os.path.dirname(self.remote_path) if self.remote_path else str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Open remote profile", start,
                                               "Remote profiles (*.remote *.xml);;All Files (*)",
                                               options=QFileDialog.DontUseNativeDialog)
         if not path:
             return
         try:
-            imported = parse_remote_file(path)
+            profile = parse_remote_file(path)
         except Exception as e:
-            QMessageBox.warning(self, "Import failed", f"Couldn't read that file:\n{e}")
+            QMessageBox.warning(self, "Open failed", f"Couldn't read that file:\n{e}")
             return
-        matched = {c: k for c, k in imported.items() if c in self._commands}
-        # Merge: commands present in the file take its keys; everything else
-        # keeps its current binding (a profile often leaves e.g. 'OSD OK' empty
-        # because the host handles Enter itself) - except keys the file now
-        # uses for something else.
-        merged = self.result_keymap()
-        taken = {key for keys in matched.values() for key in keys[:2]}
-        changed = 0
-        for command in self._commands:
-            if command in matched:
-                merged[command] = ', '.join(matched[command][:2])
-            else:
-                kept = [k.strip() for k in merged[command].split(',') if k.strip()]
-                remaining = [k for k in kept if k not in taken]
-                if remaining != kept:
-                    changed += 1
-                merged[command] = ', '.join(remaining)
-        self._fill(merged)
-        QMessageBox.information(
-            self, "Import",
-            f"Imported keys for {len(matched)} commands; {len(imported) - len(matched)} others in the file "
-            "aren't supported yet and were skipped.\n"
-            "Commands the file doesn't mention keep their current keys"
-            + (f" (except {changed} that lost a key the file now uses elsewhere)." if changed else "."))
+        self._fill(keymap_from_profile(profile, self._defaults))
+        self.remote_path = path
+        self._show_file()
+        known = sum(1 for c in profile if c in self._commands)
+        QMessageBox.information(self, "Profile loaded",
+                                f"{known} of the commands in this program are in the file; the others "
+                                "(e.g. teletext or playlist commands) are kept in the file but not used.")
+
+    def save_remote_as(self):
+        start = self.remote_path or os.path.join(str(Path.home()), 'default.remote')
+        path, _ = QFileDialog.getSaveFileName(self, "Save remote profile as", start,
+                                              "Remote profiles (*.remote)", options=QFileDialog.DontUseNativeDialog)
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += '.remote'
+        try:
+            write_remote_file(path, self.result_keymap(), template=self.remote_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", f"Couldn't write that file:\n{e}")
+            return
+        self.remote_path = path
+        self._show_file()
 
     def result_keymap(self):
         result = {}
@@ -1475,6 +1573,7 @@ class KeyMapDialog(QDialog):
 
 class TVHeadendClient(QMainWindow):
     serverListReady = pyqtSignal(str, list, str)     # window key, rows, error text
+    osdMessage = pyqtSignal(str)                     # notice for the OSD, from worker threads
 
     def __init__(self):
         super().__init__()
@@ -2419,23 +2518,44 @@ class TVHeadendClient(QMainWindow):
         'Channel List': 'K',
         'OSD Channel List': 'Ctrl+K',
         'OSD Favourites List': 'Ctrl+O',
+        'OSD Timeline': '',
+        'OSD Timer': '',
+        'OSD Recordings': '',
+        'OSD Videos': '',
+        'OSD Music': '',
+        'OSD Pictures': '',
+        'OSD HTPC Menu': '',
         'OSD Up': 'Up',
         'OSD Down': 'Down',
         'OSD Left': 'Left',
         'OSD Right': 'Right',
         'OSD OK': 'Return, Enter',
-        'OSD Back': 'Backspace, Esc',
-        'Mute': 'M, Volume Mute',
-        'Volume Up': 'Volume Up, Ctrl+Up',
-        'Volume Down': 'Volume Down, Ctrl+Down',
+        'OSD Back': 'Backspace',
+        'OSD Red': 'Ctrl+E',
+        'OSD Green': 'Ctrl+I',
+        'OSD Yellow': 'Ctrl+T',
+        'OSD Blue': 'Ctrl+M',
+        'Mute': 'M',
+        'Volume Up': 'Volume Up',
+        'Volume Down': 'Volume Down',
         'Channel Plus': '+',
         'Channel Minus': '-',
-        'Favourite Plus': 'PgUp',
-        'Favourite Minus': 'PgDown',
-        'Full Screen': 'Alt+Return',
-        'Play': 'Ctrl+P',
-        'Stop': 'Ctrl+Shift+5',
-    }, **{f'Number {d}': str(d) for d in range(10)})
+        'Favourite Plus': 'PgDown',
+        'Favourite Minus': 'PgUp',
+        'Full Screen': 'F',
+        'Play': '',
+        'Pause': 'Space',
+        'Stop': 'X',
+        'Record': 'R',
+        'Jump -xx Seconds': 'Shift+Left',
+        'Jump +xx Seconds': 'Shift+Right',
+        'Aspect Ratio': 'P',
+    }, **{f'Number {d}': str(d) for d in range(10)},
+       **{f'Favourite {d}': f'Shift+{d}' for d in range(10)})
+    # keys that always work in addition to the profile (hardware keys, Esc as "back", Alt+Enter)
+    EXTRA_KEYS = {'OSD Back': 'Esc', 'Mute': 'Volume Mute', 'Volume Up': 'Ctrl+Up', 'Volume Down': 'Ctrl+Down',
+                  'Full Screen': 'Alt+Return'}
+    JUMP_SECONDS = 30
 
     def install_crash_log(self):
         """Log unhandled exceptions and hard crashes to <config dir>/tvhviewer.log.
@@ -2665,7 +2785,8 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             print(f"Debug: OSD error: {e}")
 
-    OSD_NAV_COMMANDS = ('OSD Up', 'OSD Down', 'OSD Left', 'OSD Right', 'OSD OK', 'OSD Back')
+    OSD_NAV_COMMANDS = ('OSD Up', 'OSD Down', 'OSD Left', 'OSD Right', 'OSD OK', 'OSD Back',
+                        'OSD Red', 'OSD Green', 'OSD Yellow', 'OSD Blue')
     # keys that keep working while an OSD window has the remote
     OSD_PASSTHROUGH = ('Mute', 'Volume Up', 'Volume Down',
                        'Channel Plus', 'Channel Minus', 'Favourite Plus', 'Favourite Minus',
@@ -2694,6 +2815,7 @@ class TVHeadendClient(QMainWindow):
         if osdskin is None or self.osd_skin is None or self.osd_skin.window(skin_key) is None:
             self.statusbar.showMessage("Select an OSD skin first (Settings -> OSD Skin)")
             return
+        osdskin.set_language('de' if QLocale.system().language() == QLocale.German else 'en')
         mode = (key, bool(favourites))
         if self.osd_screen is not None and self._osd_mode == mode:
             self.close_osd_window()      # same key again = toggle off
@@ -2719,7 +2841,8 @@ class TVHeadendClient(QMainWindow):
                 self.statusbar.showMessage("No channels loaded yet")
                 self._osd_mode = None
                 return
-            current = (self.current_channel_data or {}).get('uuid')
+            current = getattr(self, '_epg_start_uuid', None) or (self.current_channel_data or {}).get('uuid')
+            self._epg_start_uuid = None
             screen = osdskin.OSDScreen(self.osd_skin, 'epgchannel', on_ok=self._osd_epg_ok, on_change=self._osd_epg_changed)
             screen.channel_index = next((i for i, c in enumerate(self.channels) if c.get('uuid') == current), 0)
             self.osd_screen = screen
@@ -2768,6 +2891,7 @@ class TVHeadendClient(QMainWindow):
             self._log_missing_icons()
         if self.osd_overlay is None:
             self.osd_overlay = osdskin.OSDOverlay(self)
+        self.osd_overlay.dynamic = self._osd_colour_values
         self.osd_overlay.screen = self.osd_screen
         area = QRect(self.video_frame.mapToGlobal(QPoint(0, 0)), self.video_frame.size())
         self.osd_overlay.set_opacity(self.config.get('osd_opacity', 100) / 100.0)
@@ -2986,10 +3110,6 @@ class TVHeadendClient(QMainWindow):
             genre = _epg_text(lst.items[lst.selected]['data'].get('genre', ''))
         screen.values = dict(osdskin.screen_info(self.osd_skin, 'epgchannel'), **{
             'epg.channelname': screen.epg_channel.get('name', ''), 'epg.genre': genre, 'epg.logo': '',
-            'tv.red': 'Aufnehmen' if QLocale.system().language() == QLocale.German else 'Record',
-            'tv.green': 'Jetzt' if QLocale.system().language() == QLocale.German else 'Now',
-            'tv.yellow': 'Umschalten' if QLocale.system().language() == QLocale.German else 'Tune',
-            'tv.blue': 'Menü' if QLocale.system().language() == QLocale.German else 'Menu',
             'itemcount': f"{lst.selected + 1}/{n}" if n else '0'})
 
     def _osd_timeline_ok(self, channel):
@@ -3048,12 +3168,17 @@ class TVHeadendClient(QMainWindow):
         screen = self.osd_screen
         if screen is None or self._osd_mode != (key, False):
             return                                    # window was closed meanwhile
+        if error == '__reload__':
+            self._osd_load_server_list(key)
+            return
         if error:
             self.close_osd_window()
             self._osd_notice("Tvheadend: " + error[:80])
             return
         upcoming = key == 'timer'
-        entries = sorted(entries, key=lambda e: e.get('start', 0), reverse=not upcoming)
+        self._server_entries = entries
+        entries = sorted(entries, key=lambda e: e.get('start', 0),
+                         reverse=(not upcoming) != getattr(self, '_rec_sort_flip', False))
         german = QLocale.system().language() == QLocale.German
         days = ('Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So') if german else ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
         rows = []
@@ -3281,25 +3406,54 @@ class TVHeadendClient(QMainWindow):
             'Favourite Minus': lambda: self.change_favourite(-1),
             'Full Screen': self.toggle_fullscreen,
             'Play': self.play_button_clicked,
+            'Pause': self.pause_toggle,
             'Stop': self.stop_playback,
+            'Record': self.record_key,
+            'Jump -xx Seconds': lambda: self.jump_seconds(-self.JUMP_SECONDS),
+            'Jump +xx Seconds': lambda: self.jump_seconds(self.JUMP_SECONDS),
+            'Aspect Ratio': self.cycle_aspect_ratio,
+            'OSD Timeline': lambda: self.open_osd_window('timeline'),
+            'OSD Timer': lambda: self.open_osd_window('timer'),
+            'OSD Recordings': lambda: self.open_osd_window('serverrecs'),
+            'OSD Videos': lambda: self.open_osd_window('videos'),
+            'OSD Music': lambda: self.open_osd_window('music'),
+            'OSD Pictures': lambda: self.open_osd_window('pictures'),
+            'OSD HTPC Menu': lambda: self.open_osd_window('home'),
+            'OSD Red': lambda: self.osd_color('red'),
+            'OSD Green': lambda: self.osd_color('green'),
+            'OSD Yellow': lambda: self.osd_color('yellow'),
+            'OSD Blue': lambda: self.osd_color('blue'),
         }
         for digit in range(10):
             handlers[f'Number {digit}'] = (lambda d=digit: self.osd_digit(d))
+            handlers[f'Favourite {digit}'] = (lambda d=digit: self.tune_favourite(d))
         return handlers
 
+    def remote_path(self):
+        """The key profile in use: config['remote_file'], default <config dir>/default.remote"""
+        path = self.config.get('remote_file') or os.path.join(self.config_dir, 'default.remote')
+        return path
+
     def effective_keymap(self):
-        keymap = dict(self.DEFAULT_KEYMAP)
-        saved = self.config.get('keymap', {})
-        if isinstance(saved, dict) and self.config.get('keymap_version', 1) < 2:
-            # v2: 'OSD Channel List' = Ctrl+K and a separate 'OSD Info' key; older saves had them empty
-            for command in ('OSD Channel List', 'OSD Info'):
-                saved.pop(command, None)
-            self.config['keymap_version'] = 2
-            self.config['keymap'] = saved
+        """Keys per command: from the .remote profile in use; commands it doesn't list keep the built-in keys"""
+        if self.config.get('keymap_version', 1) < 3:
+            # v3: the key bindings live in a .remote profile (default.remote, based on the wmc profile)
+            self.config.pop('keymap', None)
+            self.config['keymap_version'] = 3
             self.save_config()
-        if isinstance(saved, dict):
-            keymap.update({k: v for k, v in saved.items() if k in keymap})
-        return keymap
+            try:
+                if not os.path.exists(os.path.join(self.config_dir, 'default.remote')):
+                    os.makedirs(self.config_dir, exist_ok=True)
+                    write_remote_file(os.path.join(self.config_dir, 'default.remote'), self.DEFAULT_KEYMAP)
+            except Exception as e:
+                print(f"Debug: couldn't create default.remote: {e}")
+        path = self.remote_path()
+        try:
+            profile = parse_remote_file(path) if os.path.exists(path) else {}
+        except Exception as e:
+            print(f"Debug: couldn't read {path}: {e}")
+            profile = {}
+        return keymap_from_profile(profile, self.DEFAULT_KEYMAP)
 
     def setup_osd_shortcuts(self):
         """(Re)register the key bindings. Window-scoped, so they never get in
@@ -3309,9 +3463,18 @@ class TVHeadendClient(QMainWindow):
             old.deleteLater()
         self._shortcuts = []
         self._shortcut_cmds = []
+        if not getattr(self, '_osd_message_connected', False):
+            self.osdMessage.connect(self._osd_notice)
+            self._osd_message_connected = True
         handlers = self.keymap_handlers()
         used = {}
-        for command, keys in self.effective_keymap().items():
+        keymap = self.effective_keymap()
+        for command in keymap:                      # hardware / convenience keys on top of the profile
+            extra = self.EXTRA_KEYS.get(command)
+            if extra and extra not in [k.strip() for k in keymap[command].split(',')] \
+                    and not any(extra in [k.strip() for k in v.split(',')] for v in keymap.values()):
+                keymap[command] = (keymap[command] + ', ' + extra).strip(', ')
+        for command, keys in keymap.items():
             handler = handlers.get(command)
             if handler is None:
                 continue
@@ -3332,12 +3495,20 @@ class TVHeadendClient(QMainWindow):
         self.apply_osd_input_state()
 
     def edit_keymap(self):
-        dialog = KeyMapDialog(self.effective_keymap(), self.DEFAULT_KEYMAP, self)
+        path = self.remote_path()
+        dialog = KeyMapDialog(self.effective_keymap(), self.DEFAULT_KEYMAP, self, remote_path=path)
         if dialog.exec_() == QDialog.Accepted:
-            self.config['keymap'] = dialog.result_keymap()
+            path = dialog.remote_path or path
+            try:
+                os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+                write_remote_file(path, dialog.result_keymap(), template=path)
+            except Exception as e:
+                QMessageBox.warning(self, "Save failed", f"Couldn't write {path}:\n{e}")
+                return
+            self.config['remote_file'] = path
             self.save_config()
             self.setup_osd_shortcuts()
-            self.statusbar.showMessage("Key bindings saved")
+            self.statusbar.showMessage(f"Key bindings saved to {os.path.basename(path)}")
 
     def toggle_mute_from_key(self):
         self.toggle_mute()
@@ -3355,6 +3526,269 @@ class TVHeadendClient(QMainWindow):
             index = -1 if delta > 0 else 0
         self.play_channel_by_data(favourites[(index + delta) % len(favourites)])
         self._osd_after_channel_change()
+
+    # ------------------------------------------------------------------
+    # playback keys of the profile
+    # ------------------------------------------------------------------
+    def record_key(self):
+        proc = getattr(self, 'ffmpeg_process', None)
+        if proc is not None and proc.poll() is None:
+            self.stop_local_recording()
+        else:
+            self.start_local_recording()
+
+    def pause_toggle(self):
+        try:
+            state = self.media_player.get_state()
+            if self.media_player.is_playing() or state == vlc.State.Paused:
+                self.media_player.pause()          # toggles
+                self.statusbar.showMessage("Paused" if state != vlc.State.Paused else "Playing")
+                return
+        except Exception:
+            pass
+        self.play_button_clicked()
+
+    def jump_seconds(self, delta):
+        try:
+            if self.media_player.is_seekable():
+                self.media_player.set_time(max(0, self.media_player.get_time() + int(delta * 1000)))
+                self.statusbar.showMessage("%+d s" % delta)
+            else:
+                self.statusbar.showMessage("Can't jump in a live stream")
+        except Exception as e:
+            self.statusbar.showMessage(f"Jump failed: {e}")
+
+    ASPECT_RATIOS = (None, '16:9', '4:3', '16:10', '21:9', '1:1')
+
+    def cycle_aspect_ratio(self):
+        self._aspect_index = (getattr(self, '_aspect_index', 0) + 1) % len(self.ASPECT_RATIOS)
+        ratio = self.ASPECT_RATIOS[self._aspect_index]
+        try:
+            self.media_player.video_set_aspect_ratio(ratio.encode() if ratio else None)
+        except Exception:
+            pass
+        self.statusbar.showMessage("Aspect ratio: %s" % (ratio or 'default'))
+        self._osd_notice("%s" % (ratio or 'Default'), 1500)
+
+    def tune_favourite(self, digit):
+        """Shift+1..9, 0 = the 1st..10th favourite"""
+        by_name = {c.get('name'): c for c in self.channels}
+        favourites = [by_name[n] for n in self.config.get('favorites', []) if n in by_name]
+        index = (digit - 1) % 10
+        if index < len(favourites):
+            self.play_channel_by_data(favourites[index])
+            self._osd_after_channel_change()
+        else:
+            self.statusbar.showMessage(f"No favourite {digit}")
+
+    # ------------------------------------------------------------------
+    # colour buttons: captions and functions per OSD window
+    # ------------------------------------------------------------------
+    def _t(self, de, en):
+        return de if QLocale.system().language() == QLocale.German else en
+
+    def _osd_window_key(self):
+        screen = self.osd_screen
+        return getattr(screen, 'window_key', screen.key) if screen is not None else ''
+
+    def _osd_colour_values(self):
+        """Captions of the red/green/yellow/blue buttons for the open window (placeholders #TV.red ...)"""
+        screen = self.osd_screen
+        if screen is None:
+            return {}
+        t = self._t
+        key = self._osd_window_key()
+        red = green = yellow = ''
+        blue = t('Menü', 'Menu')
+        if key == 'timeline':
+            red = t('Sender-EPG', 'Channel EPG') if getattr(screen, 'focus_mode', '') != 'event' else t('Aufnehmen', 'Record')
+            green, yellow = t('Jetzt', 'Now'), t('Vorwärts', 'Forward')
+        elif key == 'epgchannel':
+            red, green, yellow = t('Aufnehmen', 'Record'), t('Jetzt', 'Now'), t('Umschalten', 'Tune')
+        elif key in ('serverrecs', 'recordings') and self._osd_mode and self._osd_mode[0] == 'serverrecs':
+            red, green, yellow = t('Sortieren', 'Sort'), t('Info', 'Info'), t('Löschen', 'Delete')
+        elif key == 'timer':
+            yellow = t('Löschen', 'Delete')
+        elif key in FILE_WINDOWS or key == 'recordings':
+            red, green, yellow = t('Hinzufügen', 'Add'), t('Wiedergabeliste', 'Playlist'), t('Ebene höher', 'Level up')
+        if (key in FILE_WINDOWS or key == 'channels') and not (self._osd_mode and self._osd_mode[0] in SERVER_LISTS):
+            blue = t('Kontext', 'Context')
+        return {'tv.red': red, 'tv.green': green, 'tv.yellow': yellow, 'tv.blue': blue}
+
+    def _osd_redraw(self):
+        self._touch_osd()
+        if self.osd_overlay is not None:
+            self.osd_overlay.update()
+
+    def osd_color(self, color):
+        """A coloured remote key. Blue is always the home menu; the others depend on the open window."""
+        screen = self.osd_screen
+        if screen is None:
+            if color == 'blue':
+                self.open_osd_window('home')
+            return
+        if color == 'blue' and (self._osd_window_key() in FILE_WINDOWS or self._osd_window_key() == 'channels') \
+                and not (self._osd_mode and self._osd_mode[0] in SERVER_LISTS):
+            self._osd_context_menu()
+            return
+        if color == 'blue':
+            if self._osd_window_key() == 'home':
+                self.close_osd_window()
+            else:
+                self.close_osd_window()
+                self.open_osd_window('home')
+            return
+        key = self._osd_window_key()
+        mode_key = self._osd_mode[0] if self._osd_mode else key
+        na = lambda: self._osd_notice(self._t("Noch nicht verfügbar", "Not available yet"))
+        if key == 'timeline':
+            if color == 'red':
+                if screen.focus_mode == 'event':
+                    self._osd_record_event(screen.event, screen.channel())
+                else:
+                    self._epg_start_uuid = screen.channel().get('uuid')
+                    self.close_osd_window()
+                    self.open_osd_window('epgchannel')
+                    return
+            elif color == 'green':
+                screen.to_now()
+            else:
+                screen.shift(screen.SPAN)
+        elif key == 'epgchannel':
+            lst = screen.lists[next(iter(screen.lists))] if screen.lists else None
+            item = lst.current if lst is not None else None
+            if color == 'red':
+                self._osd_record_event(item['data'] if item else None, screen.epg_channel)
+            elif color == 'green' and lst is not None:
+                lst.selected, lst.top = 0, 0
+                self._osd_epg_values()
+            elif color == 'yellow':
+                self._osd_epg_ok(None, item)
+                return
+        elif mode_key == 'serverrecs':
+            lst = screen.lists[next(iter(screen.lists))] if screen.lists else None
+            item = lst.current if lst is not None else None
+            if color == 'red':
+                self._rec_sort_flip = not getattr(self, '_rec_sort_flip', False)
+                self._osd_fill_server_list('serverrecs', getattr(self, '_server_entries', []), '')
+            elif color == 'green':
+                if item:
+                    self._osd_notice(item['label1'], 6000)
+            elif item:
+                self._osd_delete_entry(item['data'], 'serverrecs')
+        elif key == 'timer':
+            lst = screen.lists[next(iter(screen.lists))] if screen.lists else None
+            item = lst.current if lst is not None else None
+            if color == 'yellow' and item:
+                self._osd_delete_entry(item['data'], 'timer')
+        elif key == 'channels':
+            if color == 'red':                       # TV <-> favourites
+                favourites = getattr(screen, 'group', 'tv') != 'fav'
+                self.close_osd_window()
+                self.open_osd_window('channels', favourites=favourites)
+                return
+            lst = screen.lists.get('2')
+            item = lst.current if lst is not None else None
+            if color == 'green' and item:            # EPG of the highlighted channel
+                self._epg_start_uuid = item['data'].get('uuid')
+                self.close_osd_window()
+                self.open_osd_window('epgchannel')
+                return
+            if color == 'yellow':
+                self.close_osd_window()
+                self.manage_favorites()
+                return
+        elif key in FILE_WINDOWS or key == 'recordings':
+            if color == 'yellow':
+                self.osd_action('back')
+                return
+            na()
+        self._osd_redraw()
+
+    def _osd_context_menu(self):
+        """Blue ("Kontext") in the channel list and the file windows: a small menu of what applies"""
+        screen = self.osd_screen
+        key = self._osd_window_key()
+        t = self._t
+        menu = QMenu(self)
+        actions = []
+        if key == 'channels':
+            lst = screen.lists.get('2')
+            item = lst.current if lst is not None else None
+            channel = item['data'] if item else None
+            if channel:
+                name = channel.get('name', '')
+                fav = name in self.config.get('favorites', [])
+                actions.append((t('Sender wiedergeben', 'Play channel'), lambda: self.osd_action('ok')))
+                actions.append((t('EPG des Senders', 'Channel EPG'), lambda: self.osd_color('green')))
+                actions.append((t('Aus Favoriten entfernen', 'Remove from favourites') if fav
+                                else t('Zu Favoriten hinzufügen', 'Add to favourites'),
+                                lambda: (self.remove_favorite(name) if fav else self.add_favorite(name),
+                                         self._osd_notice(name))))
+        else:
+            actions.append((t('Öffnen / Abspielen', 'Open / play'), lambda: self.osd_action('ok')))
+            actions.append((t('Ebene höher', 'Level up'), lambda: self.osd_action('back')))
+        actions.append((t('Hauptmenü', 'Main menu'), lambda: (self.close_osd_window(), self.open_osd_window('home'))))
+        for text, fn in actions:
+            menu.addAction(text).triggered.connect(lambda _=False, f=fn: QTimer.singleShot(0, f))
+        corner = self.video_frame.mapToGlobal(QPoint(self.video_frame.width() // 2, self.video_frame.height() // 2))
+        self._osd_context = menu
+        menu.popup(corner)
+
+    def _osd_record_event(self, event, channel):
+        """Schedule a Tvheadend recording of a programme (worker thread, result as OSD notice)"""
+        if not event:
+            self._osd_notice(self._t("Keine Sendung gewählt", "No programme selected"))
+            return
+        try:
+            base, auth = self._server_base()
+        except Exception:
+            self._osd_notice("Tvheadend: no server")
+            return
+        title = _epg_text(event.get('title'), 'Recording')
+        ok_text = self._t("Aufnahme geplant: ", "Recording scheduled: ") + title
+
+        def work():
+            try:
+                if event.get('eventId'):
+                    resp = requests.post(f'{base}/api/dvr/entry/create_by_event',
+                                         data={'event_id': event['eventId']}, auth=auth, timeout=8)
+                else:
+                    conf = {'start': event['start'], 'stop': event['stop'],
+                            'channel': event.get('channelUuid') or channel.get('uuid'),
+                            'title': {'eng': title}, 'description': {'eng': _epg_text(event.get('description'))}}
+                    resp = requests.post(f'{base}/api/dvr/entry/create', data={'conf': json.dumps(conf)},
+                                         auth=auth, timeout=8)
+                resp.raise_for_status()
+                self.osdMessage.emit(ok_text)
+            except Exception as e:
+                self.osdMessage.emit("Tvheadend: " + str(e)[:80])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _osd_delete_entry(self, data, key):
+        """Yellow in Recordings / Timer: remove a finished recording or cancel an upcoming one (asks first)"""
+        uuid = (data or {}).get('uuid')
+        if not uuid:
+            return
+        title = data.get('title', '')
+        question = self._t("„%s“ löschen?" if key == 'serverrecs' else "Timer „%s“ abbrechen?",
+                           "Delete \"%s\"?" if key == 'serverrecs' else "Cancel timer \"%s\"?") % title
+        if QMessageBox.question(self, "Tvheadend", question) != QMessageBox.Yes:
+            return
+        try:
+            base, auth = self._server_base()
+        except Exception:
+            return
+        endpoint = 'remove' if key == 'serverrecs' else 'cancel'
+
+        def work():
+            try:
+                resp = requests.post(f'{base}/api/dvr/entry/{endpoint}', data={'uuid': uuid}, auth=auth, timeout=8)
+                resp.raise_for_status()
+                self.serverListReady.emit(key, [], '__reload__')
+            except Exception as e:
+                self.osdMessage.emit("Tvheadend: " + str(e)[:80])
+        threading.Thread(target=work, daemon=True).start()
 
     def osd_digit(self, digit):
         """Direct channel entry: digits collect for 1.5 s, then tune"""
