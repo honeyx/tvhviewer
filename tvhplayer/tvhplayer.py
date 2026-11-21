@@ -2554,7 +2554,7 @@ class TVHeadendClient(QMainWindow):
        **{f'Favourite {d}': f'Shift+{d}' for d in range(10)})
     # keys that always work in addition to the profile (hardware keys, Esc as "back", Alt+Enter)
     EXTRA_KEYS = {'OSD Back': 'Esc', 'Mute': 'Volume Mute', 'Volume Up': 'Ctrl+Up', 'Volume Down': 'Ctrl+Down',
-                  'Full Screen': 'Alt+Return'}
+                  'Full Screen': 'Alt+Return', 'Pause': 'Ctrl+P'}
     JUMP_SECONDS = 30
 
     def install_crash_log(self):
