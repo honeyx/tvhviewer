@@ -99,7 +99,7 @@ Default keys: `Ctrl+D` OSD menu, `Ctrl+G` channel EPG, `E` EPG window, `K` chann
 `PgDown`/`PgUp` next/previous favourite, `Shift+1`...`Shift+0` favourite 1-10, `0`-`9` direct
 channel entry, `Space` pause, `X` stop, `R` local recording, `Shift+Left`/`Shift+Right` jump
 30 s, `P` aspect ratio, `F` or `Alt+Enter` fullscreen. The volume keys of the keyboard and
-`Esc` (back) work in addition to the profile. Commands for opening single OSD windows
+`Esc` (back), `Ctrl+P` (pause) work in addition to the profile. Commands for opening single OSD windows
 (*OSD Timeline*, *OSD Timer*, *OSD Recordings*, *OSD Videos*, *OSD Music*, *OSD Pictures*,
 *OSD HTPC Menu*) have no key by default.
 
