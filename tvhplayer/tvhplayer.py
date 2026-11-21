@@ -1506,12 +1506,16 @@ class TVHeadendClient(QMainWindow):
         # Set window title and geometry from config
         self.setWindowTitle("TVHviewer")
         geometry = self.config.get('window_geometry', {'x': 100, 'y': 100, 'width': 1200, 'height': 700})
-        self.setGeometry(
-            geometry['x'],
-            geometry['y'],
-            geometry['width'],
-            geometry['height']
-        )
+        # setGeometry() takes the client area (below the title bar); keep the window on a screen, because
+        # earlier versions saved the frame position and so moved up by a title bar height on every start
+        rect = QRect(geometry['x'], geometry['y'], geometry['width'], geometry['height'])
+        screen = QApplication.screenAt(rect.center()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        rect.setWidth(min(rect.width(), avail.width()))
+        rect.setHeight(min(rect.height(), avail.height()))
+        rect.moveLeft(max(avail.left(), min(rect.left(), avail.right() - rect.width())))
+        rect.moveTop(max(avail.top() + 40, min(rect.top(), avail.bottom() - rect.height())))
+        self.setGeometry(rect)
         
         # Initialize servers from config
         self.servers = self.config.get('servers', [])
@@ -2360,7 +2364,18 @@ class TVHeadendClient(QMainWindow):
     def play_button_clicked(self):
         """Resume whatever channel was last playing (e.g. after Stop),
         falling back to the selected/first channel if nothing has played
-        yet this session."""
+        yet this session. While a recording / video file plays, Play is Play/Pause."""
+        if getattr(self, '_playing_file', False):
+            try:
+                if self.media_player.is_playing():
+                    self.media_player.pause()
+                    self.statusbar.showMessage("Paused")
+                else:
+                    self.media_player.play()
+                    self.statusbar.showMessage("Playing")
+            except Exception as e:
+                self.statusbar.showMessage(f"Couldn't pause: {e}")
+            return
         if self.current_channel_data:
             self.play_channel_by_data(self.current_channel_data)
             return
@@ -3205,6 +3220,7 @@ class TVHeadendClient(QMainWindow):
             media = self.instance.media_new_path(path) if os.path.exists(path) else self.instance.media_new(path)
             self.media_player.set_media(media)
             self.media_player.play()
+            self._playing_file = True
             self.statusbar.showMessage(f"Playing: {os.path.basename(path)}")
         except Exception as e:
             self.statusbar.showMessage(f"Couldn't play {os.path.basename(path)}: {e}")
@@ -3654,6 +3670,7 @@ class TVHeadendClient(QMainWindow):
     def stop_playback(self):
         print("Debug: Stopping playback")
         """Stop current playback"""
+        self._playing_file = False
         self.media_player.stop()
         self.statusbar.showMessage("Playback stopped")
 
@@ -3755,11 +3772,12 @@ class TVHeadendClient(QMainWindow):
         try:
             # Update window geometry in config
             if not self.is_fullscreen:
+                geo = self.geometry()          # client area: what setGeometry() restores
                 self.config['window_geometry'] = {
-                    'x': self.x(),
-                    'y': self.y(),
-                    'width': self.width(),
-                    'height': self.height()
+                    'x': geo.x(),
+                    'y': geo.y(),
+                    'width': geo.width(),
+                    'height': geo.height()
                 }
             
             # Update servers in config
@@ -4910,6 +4928,7 @@ class TVHeadendClient(QMainWindow):
         if self.kodi_active:
             self.statusbar.showMessage("Kodi is running - live TV is paused until it is closed")
             return
+        self._playing_file = False
         try:
             self.current_channel_data = channel_data
             if channel_data and channel_data.get('name'):
