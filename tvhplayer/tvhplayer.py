@@ -6413,7 +6413,7 @@ def main():
                 pass
         app = QApplication(sys.argv)
         app.setApplicationName('TVHviewer')
-        app.setDesktopFileName('tvhviewer')
+        app.setDesktopFileName(os.environ.get('FLATPAK_ID', 'tvhviewer'))
         player = TVHeadendClient()
         for name in ('tvhviewer.png', 'tvhplayer.png'):
             logo = Path(player.icons_dir) / name
