@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
-Name=TVHPlayer
-GenericName=TVH Player
+Name=TVHviewer
+GenericName=Tvheadend client
 Comment=Desktop client for TVHeadend
 Exec=tvhplayer
 Icon=/usr/share/icons/hicolor/256x256/apps/tvhplayer.png
