@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.honeyx.tvhviewer</id>
+  <name>TVHviewer</name>
+  <summary>Desktop client for Tvheadend: watch and record live TV</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      TVHviewer is a desktop client for Tvheadend, a fork of TVHplayer by mFat. Watch and record TV channels from your Tvheadend server.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Watch live TV</li>
+      <li>Record TV shows on the server or locally</li>
+      <li>EPG with timeline and newspaper views, favourites</li>
+      <li>Optional on-screen display drawn from skins you provide yourself, with remote control (Flirc) support</li>
+      <li>Support for multiple Tvheadend servers</li>
+      <li>Runs on GNU/Linux and Windows</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.honeyx.tvhviewer.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>TVHviewer main interface</caption>
+      <image>https://raw.githubusercontent.com/honeyx/tvhviewer/main/Screenshots/Screenshot_7.png</image>
+    </screenshot>
+  </screenshots>
+  <url type="homepage">https://github.com/honeyx/tvhviewer</url>
+  <url type="bugtracker">https://github.com/honeyx/tvhviewer/issues</url>
+  <content_rating type="oars-1.1" />
+  <developer id="io.github.honeyx">
+    <name>honeyx</name>
+  </developer>
+</component>
