@@ -72,6 +72,12 @@ Copy a skin folder you are entitled to use into the `OSDskins` folder
 directory, e.g. `%APPDATA%\TVHplayer\OSDskins` on Windows) and pick it under
 Settings → OSD Skin. The default is *Off*.
 
+TVHviewer reads OSD skins in the format used by DVBViewer™ (OSDSkin 1.1), so skins made
+for DVBViewer can be used with it. TVHviewer is an independent project and is not affiliated
+with, authorised or endorsed by the makers of DVBViewer. DVBViewer™ is a product and trademark of
+CM&V Hackbart (Christian Hackbart); all other product names and trademarks mentioned belong to
+their respective owners.
+
 ### Using a skin
 
 1. Copy the skin's folder (for example `Xbox` or `concinnity 3D`) into the `OSDskins`
