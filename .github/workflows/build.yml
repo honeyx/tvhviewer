@@ -53,6 +53,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           pyinstaller --onedir --windowed --name=${{ matrix.artifact_name }} `
+            --icon icons/tvhviewer.ico `
             --add-data "icons;icons" `
             --collect-all PyQt5 `
             --paths tvhplayer --hidden-import osdskin `
