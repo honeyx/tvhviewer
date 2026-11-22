@@ -21,7 +21,7 @@ See [NOTICE.md](NOTICE.md) for full credits and a summary of what changed in thi
   Media Center style keys (see below)
 - Server status, tuner signal strength, and video/audio format shown
   in the status bar
-- Cross-platform (Linux, macOS, Windows) — this fork has mainly been
+- Cross-platform (Linux x86_64 and arm64, Windows) — this fork has mainly been
   tested on Linux (Zorin OS / Ubuntu)
 
 ## Install
@@ -31,6 +31,11 @@ Download the latest `.deb` from [Releases](../../releases) and install:
 ```bash
 sudo apt install ./tvhviewer_*.deb
 ```
+The `.deb` is architecture independent and works on x86_64 and arm64 (e.g. Raspberry Pi).
+
+### Linux (AppImage / single binary)
+Releases also contain a portable `.AppImage` and a single-file binary for x86_64 and for
+arm64 (`aarch64`). VLC must be installed on the system; ffmpeg is needed for local recording.
 
 ### Windows (installer)
 Download the latest `tvhviewer-X.X.X-setup.exe` from [Releases](../../releases)
@@ -38,12 +43,6 @@ and run it. ffmpeg (for local recording) is bundled — you only need
 **[VLC](https://www.videolan.org/vlc/) installed separately**, since
 python-vlc only provides bindings to your system's VLC installation,
 not VLC itself.
-
-### macOS (built executable)
-Download the latest macOS build from [Releases](../../releases).
-**You still need [VLC](https://www.videolan.org/vlc/) installed separately**,
-and **[ffmpeg](https://ffmpeg.org/download.html)** on your PATH for local
-recording (server-side recording via the EPG guide doesn't need it).
 
 ### From source
 ```bash
