@@ -20,6 +20,7 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\tvhviewer-windows.exe
+SetupIconFile=..\icons\tvhviewer.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
