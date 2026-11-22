@@ -6405,8 +6405,22 @@ def main():
             QCoreApplication.setAttribute(Qt.AA_X11InitThreads, True)
             os.environ["QT_QPA_PLATFORM"] = "xcb"
         
+        if sys.platform == 'win32':
+            try:   # own taskbar identity instead of the one of python.exe
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('honeyx.tvhviewer')
+            except Exception:
+                pass
         app = QApplication(sys.argv)
+        app.setApplicationName('TVHviewer')
+        app.setDesktopFileName('tvhviewer')
         player = TVHeadendClient()
+        for name in ('tvhviewer.png', 'tvhplayer.png'):
+            logo = Path(player.icons_dir) / name
+            if logo.exists():
+                app.setWindowIcon(QIcon(str(logo)))
+                player.setWindowIcon(QIcon(str(logo)))
+                break
         player.show()
         sys.exit(app.exec_())
     except Exception as e:
